@@ -1,7 +1,7 @@
-// server.js (ESM, Express + Webhook для Render)
-import express from "express";
-import fetch from "node-fetch";
-import crypto from "crypto";
+// server.js
+const express = require("express");
+const fetch = require("node-fetch");
+const crypto = require("crypto");
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
@@ -12,15 +12,15 @@ if (!TELEGRAM_TOKEN) {
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const PORT = process.env.PORT || 3000;
 
-let users = {}; 
-// структура: { chatId: { sites: [], lastHashes: {}, monitoring: true } }
+let users = {}; // { chatId: { sites: [], lastHashes: {}, monitoring: true } }
 
 const app = express();
 app.use(express.json());
 
-// 📩 обработка сообщений от Telegram
+// 📩 лог и обработка сообщений
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const update = req.body;
+  console.log("📩 Пришло обновление:", JSON.stringify(update, null, 2));
 
   if (update.message && update.message.text) {
     const chatId = String(update.message.chat.id);
@@ -82,13 +82,14 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         "👋 Привет! Я бот для мониторинга сайтов.\n\n" +
           "Команды:\n" +
           "/monitor <url> — начать следить за страницей\n" +
-          "/list — показать список отслеживаемых сайтов\n" +
+          "/list — список отслеживаемых сайтов\n" +
           "/remove <номер|url> — удалить сайт\n" +
           "/stop — приостановить мониторинг\n" +
           "/resume — возобновить мониторинг"
       );
     }
   }
+
   res.sendStatus(200);
 });
 
@@ -120,22 +121,20 @@ setInterval(async () => {
 
 // 📩 отправка сообщений
 async function sendTelegramMessage(chatId, text) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
+  const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true })
   });
+  const data = await res.json();
+  console.log("📤 Ответ Telegram:", data);
 }
-
-// 🌍 healthcheck для Render
-app.get("/", (req, res) => {
-  res.send("✅ Bot is running!");
-});
 
 // 🚀 запуск сервера
 app.listen(PORT, async () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 
+  // Устанавливаем webhook
   const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
   const res = await fetch(`${TELEGRAM_API}/setWebhook?url=${url}`);
   const data = await res.json();
