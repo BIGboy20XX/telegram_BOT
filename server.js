@@ -17,11 +17,37 @@ let users = {}; // { chatId: { sites: [], lastHashes: {}, monitoring: true } }
 const app = express();
 app.use(express.json());
 
-// 📩 лог и обработка сообщений
+// 📩 обработка webhook
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const update = req.body;
   console.log("📩 Пришло обновление:", JSON.stringify(update, null, 2));
 
+  // обработка нажатий кнопок
+  if (update.callback_query) {
+    const chatId = String(update.callback_query.message.chat.id);
+    const action = update.callback_query.data;
+
+    if (action === "list") {
+      const list = users[chatId]?.sites || [];
+      if (list.length === 0) {
+        await sendTelegramMessage(chatId, "📭 Нет сайтов для мониторинга.");
+      } else {
+        let msg = "📋 Сайты в мониторинге:\n";
+        list.forEach((u, i) => (msg += `${i + 1}. ${u}\n`));
+        await sendTelegramMessage(chatId, msg);
+      }
+    } else if (action === "stop") {
+      users[chatId].monitoring = false;
+      await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
+    } else if (action === "resume") {
+      users[chatId].monitoring = true;
+      await sendTelegramMessage(chatId, "▶️ Мониторинг возобновлён.");
+    }
+
+    return res.sendStatus(200);
+  }
+
+  // обработка текстовых сообщений
   if (update.message && update.message.text) {
     const chatId = String(update.message.chat.id);
     const text = update.message.text.trim();
@@ -37,55 +63,26 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       } else if (!users[chatId].sites.includes(url)) {
         users[chatId].sites.push(url);
         users[chatId].lastHashes[url] = "";
-        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
+        await sendTelegramMessage(chatId, `✅ Буду следить за: ${url}`);
       } else {
-        await sendTelegramMessage(chatId, `ℹ️ Уже слежу за: <b>${url}</b>`);
+        await sendTelegramMessage(chatId, `ℹ️ Уже слежу за: ${url}`);
       }
-    } else if (text === "/list") {
-      const list = users[chatId].sites;
-      if (!list || list.length === 0) {
-        await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй /monitor <url>");
-      } else {
-        let msg = "📋 Сайты в мониторинге:\n";
-        list.forEach((u, i) => (msg += `${i + 1}. ${u}\n`));
-        await sendTelegramMessage(chatId, msg);
-      }
-    } else if (text.startsWith("/remove ")) {
-      const param = text.split(" ")[1];
-      const list = users[chatId].sites;
-      let removed = false;
-      if (/^\d+$/.test(param)) {
-        const idx = parseInt(param, 10) - 1;
-        if (list[idx]) {
-          const url = list.splice(idx, 1)[0];
-          delete users[chatId].lastHashes[url];
-          removed = true;
-        }
-      } else {
-        const idx = list.indexOf(param);
-        if (idx !== -1) {
-          list.splice(idx, 1);
-          delete users[chatId].lastHashes[param];
-          removed = true;
-        }
-      }
-      await sendTelegramMessage(chatId, removed ? "✅ Удалено" : "❌ Не найдено");
-    } else if (text === "/stop") {
-      users[chatId].monitoring = false;
-      await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
-    } else if (text === "/resume") {
-      users[chatId].monitoring = true;
-      await sendTelegramMessage(chatId, "▶️ Мониторинг возобновлён.");
     } else if (text === "/start") {
       await sendTelegramMessage(
         chatId,
-        "👋 Привет! Я бот для мониторинга сайтов.\n\n" +
-          "Команды:\n" +
-          "/monitor <url> — начать следить за страницей\n" +
-          "/list — список отслеживаемых сайтов\n" +
-          "/remove <номер|url> — удалить сайт\n" +
-          "/stop — приостановить мониторинг\n" +
-          "/resume — возобновить мониторинг"
+        "👋 Привет! Я бот для мониторинга сайтов.\n" +
+          "Выбери действие из меню:",
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "📋 Список сайтов", callback_data: "list" }],
+              [
+                { text: "⛔ Остановить мониторинг", callback_data: "stop" },
+                { text: "▶️ Возобновить", callback_data: "resume" }
+              ]
+            ]
+          }
+        }
       );
     }
   }
@@ -106,36 +103,31 @@ setInterval(async () => {
         const hash = crypto.createHash("md5").update(text).digest("hex");
 
         if (cfg.lastHashes[url] && cfg.lastHashes[url] !== hash) {
-          await sendTelegramMessage(chatId, `⚡ Обновление на <b>${url}</b>`);
+          await sendTelegramMessage(chatId, `⚡ Обновление на ${url}`);
         } else if (!cfg.lastHashes[url]) {
-          await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${url}</b>`);
+          await sendTelegramMessage(chatId, `🔍 Начал мониторинг: ${url}`);
         }
 
         cfg.lastHashes[url] = hash;
       } catch (err) {
-        await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
+        await sendTelegramMessage(chatId, `❌ Ошибка при проверке ${url}: ${err.message}`);
       }
     }
   }
 }, 30_000);
 
-// 📩 отправка сообщений
-async function sendTelegramMessage(chatId, text) {
-  // экранирование угловых скобок, чтобы Telegram не падал
-  const safeText = text
-    .replace(/&/g, "&amp;")   // сначала амперсанды
-    .replace(/</g, "&lt;")    // потом угловые скобки
-    .replace(/>/g, "&gt;");
-
+// 📩 универсальная функция отправки сообщений
+async function sendTelegramMessage(chatId, text, extra = {}) {
   try {
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        text: safeText,
+        text,
         parse_mode: "HTML",
-        disable_web_page_preview: true
+        disable_web_page_preview: true,
+        ...extra
       })
     });
 
