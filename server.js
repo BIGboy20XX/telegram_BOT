@@ -121,14 +121,31 @@ setInterval(async () => {
 
 // 📩 отправка сообщений
 async function sendTelegramMessage(chatId, text) {
-  const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true })
-  });
-  const data = await res.json();
-  console.log("📤 Ответ Telegram:", data);
+  // экранирование угловых скобок, чтобы Telegram не падал
+  const safeText = text
+    .replace(/&/g, "&amp;")   // сначала амперсанды
+    .replace(/</g, "&lt;")    // потом угловые скобки
+    .replace(/>/g, "&gt;");
+
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text: safeText,
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      })
+    });
+
+    const data = await res.json();
+    console.log("Ответ Telegram:", data);
+  } catch (err) {
+    console.error("Ошибка отправки сообщения:", err);
+  }
 }
+
 
 // 🚀 запуск сервера
 app.listen(PORT, async () => {
