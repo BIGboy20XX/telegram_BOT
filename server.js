@@ -75,17 +75,49 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "📋 Список сайтов", callback_data: "list" }],
-              [
-                { text: "⛔ Остановить мониторинг", callback_data: "stop" },
-                { text: "▶️ Возобновить", callback_data: "resume" }
-              ]
-            ]
+               [{ text: "➕ Добавить сайт" }, { text: "📋 Список сайтов" }],
+          [{ text: "⛔ Остановить мониторинг" }, { text: "▶️ Возобновить мониторинг" }],
+          [{ text: "ℹ️ Помощь" }]
+            ],
+            resize_keyboard: true
           }
         }
       );
     }
   }
+  else if (text === "➕ Добавить сайт") {
+  await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n/monitor <url>");
+}
+else if (text === "📋 Список сайтов") {
+  const list = users[chatId].sites;
+  if (!list || list.length === 0) {
+    await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй /monitor <url>");
+  } else {
+    let msg = "📋 Сайты в мониторинге:\n";
+    list.forEach((u, i) => (msg += `${i + 1}. ${u}\n`));
+    await sendTelegramMessage(chatId, msg);
+  }
+}
+else if (text === "⛔ Остановить мониторинг") {
+  users[chatId].monitoring = false;
+  await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
+}
+else if (text === "▶️ Возобновить мониторинг") {
+  users[chatId].monitoring = true;
+  await sendTelegramMessage(chatId, "▶️ Мониторинг возобновлён.");
+}
+else if (text === "ℹ️ Помощь") {
+  await sendTelegramMessage(
+    chatId,
+    "📖 Доступные команды:\n\n" +
+    "/monitor <url> — начать следить за страницей\n" +
+    "/list — список отслеживаемых сайтов\n" +
+    "/remove <номер|url> — удалить сайт\n" +
+    "/stop — приостановить мониторинг\n" +
+    "/resume — возобновить мониторинг\n"
+  );
+}
+
 
   res.sendStatus(200);
 });
