@@ -84,17 +84,18 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       );
     }
     else if (text.startsWith("/monitor ")) {
-      const url = text.split(" ")[1];
-      if (!url) {
-        await sendTelegramMessage(chatId, "Использование: /monitor <url>");
-      } else {
-        await pool.query(
-          "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1,$2,'','') ON CONFLICT DO NOTHING",
-          [chatId, url]
-        );
-        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
-      }
-    }
+  const url = text.split(" ")[1];
+  if (!url) {
+    await sendTelegramMessage(chatId, "Использование: /monitor <url>");
+  } else {
+    await pool.query(
+      "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1, $2, NULL, NULL) ON CONFLICT DO NOTHING",
+      [chatId, url]
+    );
+    await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
+  }
+}
+
     else if (text.startsWith("/remove ")) {
       const param = text.split(" ")[1];
       const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
@@ -132,15 +133,15 @@ setInterval(async () => {
         const hash = crypto.createHash("md5").update(text).digest("hex");
 
         if (site.last_hash && site.last_hash !== hash) {
-          const now = new Date();
-          const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
-          await sendTelegramMessage(
-            user.chat_id,
-            `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
-          );
-          await pool.query(
-  "UPDATE sites SET last_hash = $1, last_update = NOW() WHERE id = $2",
-  [newHash, site.id]
+  const now = new Date();
+  const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
+  await sendTelegramMessage(
+    user.chat_id,
+    `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
+  );
+  await pool.query(
+    "UPDATE sites SET last_hash = $1, last_update = NOW() WHERE id = $2",
+    [hash, site.id]
 );
 
         } else if (!site.last_hash) {
