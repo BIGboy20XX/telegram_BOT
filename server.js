@@ -139,9 +139,10 @@ setInterval(async () => {
             `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
           );
           await pool.query(
-            "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
-            [hash, now, site.id]
-          );
+  "UPDATE sites SET last_hash = $1, last_update = NOW() WHERE id = $2",
+  [newHash, site.id]
+);
+
         } else if (!site.last_hash) {
           const now = new Date();
           await sendTelegramMessage(user.chat_id, `🔍 Начал мониторинг: <b>${site.url}</b>`);
