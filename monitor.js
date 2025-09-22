@@ -4,7 +4,7 @@ const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
 
-const TELEGRAM_TOKEN = "8411816917:AAFHQvJYbNW4hanBvA2ahsZ5QV1jBEfLdKM"; // <-- поставь токен
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN; // <-- поставь токен
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 const USERS_FILE = path.join(__dirname, "users.json");
@@ -150,7 +150,7 @@ async function listenCommands() {
               saveUsers(users);
               await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
             } else {
-              await sendTelegramMessage(chatId, `ℹ️ Уже следлю за: <b>${url}</b>`);
+              await sendTelegramMessage(chatId, `ℹ️ Уже слежу за: <b>${url}</b>`);
             }
           } else if (text === "/list") {
             const list = users[chatId].sites;

@@ -2,6 +2,7 @@
 const express = require("express");
 const fetch = require("node-fetch");
 const crypto = require("crypto");
+const { Pool } = require("pg");
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
@@ -12,7 +13,10 @@ if (!TELEGRAM_TOKEN) {
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const PORT = process.env.PORT || 3000;
 
-let users = {}; // { chatId: { sites: [], lastHashes: {}, monitoring: true } }
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
 const app = express();
 app.use(express.json());
@@ -26,11 +30,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const chatId = String(update.message.chat.id);
     const text = update.message.text.trim();
 
-    if (!users[chatId]) {
-      users[chatId] = { sites: [], lastHashes: {}, monitoring: true };
-    }
-
-    // ---------------- Команды и кнопки ----------------
     if (text === "/start") {
       await sendTelegramMessage(
         chatId,
@@ -51,21 +50,26 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n/monitor <url>");
     }
     else if (text === "📋 Список сайтов") {
-      const list = users[chatId].sites;
-      if (!list || list.length === 0) {
+      const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
+      if (result.rows.length === 0) {
         await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй /monitor <url>");
       } else {
         let msg = "📋 Сайты в мониторинге:\n";
-        list.forEach((u, i) => (msg += `${i + 1}. ${u}\n`));
+        for (const [i, row] of result.rows.entries()) {
+          const time = row.last_update
+            ? new Date(row.last_update).toLocaleString("ru-RU", { timeZone: "Asia/Almaty" })
+            : "—";
+          msg += `${i + 1}. ${row.url} (посл. изм: ${time})\n`;
+        }
         await sendTelegramMessage(chatId, msg);
       }
     }
     else if (text === "⛔ Остановить мониторинг") {
-      users[chatId].monitoring = false;
+      await pool.query("UPDATE users SET monitoring=false WHERE chat_id=$1", [chatId]);
       await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
     }
     else if (text === "▶️ Возобновить мониторинг") {
-      users[chatId].monitoring = true;
+      await pool.query("UPDATE users SET monitoring=true WHERE chat_id=$1", [chatId]);
       await sendTelegramMessage(chatId, "▶️ Мониторинг возобновлён.");
     }
     else if (text === "ℹ️ Помощь") {
@@ -79,88 +83,79 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         "/resume — возобновить мониторинг\n"
       );
     }
-    // ---------------- Старые команды ----------------
     else if (text.startsWith("/monitor ")) {
       const url = text.split(" ")[1];
       if (!url) {
         await sendTelegramMessage(chatId, "Использование: /monitor <url>");
-      } else if (!users[chatId].sites.includes(url)) {
-        users[chatId].sites.push(url);
-        users[chatId].lastHashes[url] = "";
+      } else {
+        await pool.query(
+          "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1,$2,'','') ON CONFLICT DO NOTHING",
+          [chatId, url]
+        );
         await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
-      } else {
-        await sendTelegramMessage(chatId, `ℹ️ Уже слежу за: <b>${url}</b>`);
-      }
-    }
-    else if (text === "/list") {
-      const list = users[chatId].sites;
-      if (!list || list.length === 0) {
-        await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй /monitor <url>");
-      } else {
-        let msg = "📋 Сайты в мониторинге:\n";
-        list.forEach((u, i) => (msg += `${i + 1}. ${u}\n`));
-        await sendTelegramMessage(chatId, msg);
       }
     }
     else if (text.startsWith("/remove ")) {
       const param = text.split(" ")[1];
-      const list = users[chatId].sites;
+      const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
       let removed = false;
+
       if (/^\d+$/.test(param)) {
         const idx = parseInt(param, 10) - 1;
-        if (list[idx]) {
-          const url = list.splice(idx, 1)[0];
-          delete users[chatId].lastHashes[url];
+        if (result.rows[idx]) {
+          await pool.query("DELETE FROM sites WHERE id=$1", [result.rows[idx].id]);
           removed = true;
         }
       } else {
-        const idx = list.indexOf(param);
-        if (idx !== -1) {
-          list.splice(idx, 1);
-          delete users[chatId].lastHashes[param];
+        const row = result.rows.find(r => r.url === param);
+        if (row) {
+          await pool.query("DELETE FROM sites WHERE id=$1", [row.id]);
           removed = true;
         }
       }
       await sendTelegramMessage(chatId, removed ? "✅ Удалено" : "❌ Не найдено");
-    }
-    else if (text === "/stop") {
-      users[chatId].monitoring = false;
-      await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
-    }
-    else if (text === "/resume") {
-      users[chatId].monitoring = true;
-      await sendTelegramMessage(chatId, "▶️ Мониторинг возобновлён.");
     }
   }
 
   res.sendStatus(200);
 });
 
-// 🚀 проверка сайтов каждые 30 секунд
+// 🚀 проверка сайтов каждые 60 секунд
 setInterval(async () => {
-  for (const chatId in users) {
-    const cfg = users[chatId];
-    if (!cfg.monitoring) continue;
-
-    for (const url of cfg.sites) {
+  const users = await pool.query("SELECT * FROM users WHERE monitoring=true");
+  for (const user of users.rows) {
+    const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [user.chat_id]);
+    for (const site of sites.rows) {
       try {
-        const res = await fetch(url);
+        const res = await fetch(site.url);
         const text = await res.text();
         const hash = crypto.createHash("md5").update(text).digest("hex");
 
-        if (cfg.lastHashes[url] && cfg.lastHashes[url] !== hash) {
-          await sendTelegramMessage(chatId, `⚡ Обновление на <b>${url}</b>`);
-        } else if (!cfg.lastHashes[url]) {
-          await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${url}</b>`);
+        if (site.last_hash && site.last_hash !== hash) {
+          const now = new Date();
+          const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
+          await sendTelegramMessage(
+            user.chat_id,
+            `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
+          );
+          await pool.query(
+            "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
+            [hash, now, site.id]
+          );
+        } else if (!site.last_hash) {
+          const now = new Date();
+          await sendTelegramMessage(user.chat_id, `🔍 Начал мониторинг: <b>${site.url}</b>`);
+          await pool.query(
+            "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
+            [hash, now, site.id]
+          );
         }
-
-        cfg.lastHashes[url] = hash;
       } catch (err) {
-        await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
+        await sendTelegramMessage(user.chat_id, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
       }
     }
   }
-}, 30_000);
+}, 60_000);
 
 // 📩 отправка сообщений
 async function sendTelegramMessage(chatId, text, extra = {}) {
