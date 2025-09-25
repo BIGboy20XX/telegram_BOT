@@ -30,13 +30,14 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const chatId = String(update.message.chat.id);
     const text = update.message.text.trim();
 
-    // ✅ гарантируем, что юзер есть в БД
-    await pool.query(
-      "INSERT INTO users (chat_id, monitoring) VALUES ($1, true) ON CONFLICT (chat_id) DO NOTHING",
-      [chatId]
-    );
-
+    // 🟢 кнопки
     if (text === "/start") {
+      // создаём пользователя, если его нет
+      await pool.query(
+        "INSERT INTO users (chat_id, monitoring) VALUES ($1,true) ON CONFLICT (chat_id) DO NOTHING",
+        [chatId]
+      );
+
       await sendTelegramMessage(
         chatId,
         "👋 Привет! Я бот для мониторинга сайтов.\n\nВыбери действие:",
@@ -44,6 +45,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
           reply_markup: {
             keyboard: [
               [{ text: "➕ Добавить сайт" }, { text: "📋 Список сайтов" }],
+              [{ text: "🔍 Проверить обновления" }],
               [{ text: "⛔ Остановить мониторинг" }, { text: "▶️ Возобновить мониторинг" }],
               [{ text: "ℹ️ Помощь" }]
             ],
@@ -70,6 +72,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         await sendTelegramMessage(chatId, msg);
       }
     }
+    else if (text === "🔍 Проверить обновления") {
+      await checkUpdates(chatId);
+    }
     else if (text === "⛔ Остановить мониторинг") {
       await pool.query("UPDATE users SET monitoring=false WHERE chat_id=$1", [chatId]);
       await sendTelegramMessage(chatId, "⛔ Мониторинг приостановлен.");
@@ -85,8 +90,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         "/monitor <url> — начать следить за страницей\n" +
         "/list — список отслеживаемых сайтов\n" +
         "/remove <номер|url> — удалить сайт\n" +
-        "/stop — приостановить мониторинг\n" +
-        "/resume — возобновить мониторинг\n"
+        "🔍 Проверить обновления — вручную проверить изменения"
       );
     }
     else if (text.startsWith("/monitor ")) {
@@ -95,7 +99,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         await sendTelegramMessage(chatId, "Использование: /monitor <url>");
       } else {
         await pool.query(
-          "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1, $2, '', NOW()) ON CONFLICT DO NOTHING",
+          "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1,$2,'',NOW()) ON CONFLICT DO NOTHING",
           [chatId, url]
         );
         await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
@@ -126,56 +130,56 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// 🚀 проверка сайтов каждые 60 секунд
-setInterval(async () => {
-  const users = await pool.query("SELECT * FROM users WHERE monitoring=true");
-  for (const user of users.rows) {
-    const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [user.chat_id]);
-    for (const site of sites.rows) {
-      try {
-        const res = await fetch(site.url);
-        const text = await res.text();
-        const hash = crypto.createHash("md5").update(text).digest("hex");
+// 🔍 функция ручной проверки
+async function checkUpdates(chatId) {
+  const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
+  if (sites.rows.length === 0) {
+    await sendTelegramMessage(chatId, "Нет сайтов для проверки. Добавь через /monitor <url>");
+    return;
+  }
 
-        if (site.last_hash && site.last_hash !== hash) {
-          const now = new Date();
-          const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
-          await sendTelegramMessage(
-            user.chat_id,
-            `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
-          );
-          await pool.query(
-            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
-            [hash, site.id]
-          );
-        } else if (!site.last_hash) {
-          await sendTelegramMessage(user.chat_id, `🔍 Начал мониторинг: <b>${site.url}</b>`);
-          await pool.query(
-            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
-            [hash, site.id]
-          );
-        }
-      } catch (err) {
-        await sendTelegramMessage(user.chat_id, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
+  for (const site of sites.rows) {
+    try {
+      const res = await fetch(site.url);
+      const text = await res.text();
+      const hash = crypto.createHash("md5").update(text).digest("hex");
+
+      if (site.last_hash && site.last_hash !== hash) {
+        const now = new Date();
+        const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
+        await sendTelegramMessage(
+          chatId,
+          `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
+        );
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
+          [hash, site.id]
+        );
+      } else if (!site.last_hash) {
+        const now = new Date();
+        await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
+          [hash, now, site.id]
+        );
+      } else {
+        await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
       }
+    } catch (err) {
+      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
     }
   }
-}, 60_000);
+}
 
 // 📩 отправка сообщений
 async function sendTelegramMessage(chatId, text, extra = {}) {
-  const safeText = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-
   try {
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: chatId,
-        text: safeText,
+        text,
         parse_mode: "HTML",
         disable_web_page_preview: true,
         ...extra
@@ -193,7 +197,6 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
 app.listen(PORT, async () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 
-  // Устанавливаем webhook
   const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
   const res = await fetch(`${TELEGRAM_API}/setWebhook?url=${url}`);
   const data = await res.json();
