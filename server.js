@@ -149,27 +149,36 @@ async function checkUpdates(chatId) {
         const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
         await sendTelegramMessage(
           chatId,
-          `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
+          `⚡ Обновление на <a href="${site.url}">${site.url}</a>\n🕒 Время: ${formatted}`
         );
         await pool.query(
           "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
           [hash, site.id]
         );
       } else if (!site.last_hash) {
-        const now = new Date();
-        await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
+        await sendTelegramMessage(
+          chatId,
+          `🔍 Начал мониторинг: <a href="${site.url}">${site.url}</a>`
+        );
         await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
-          [hash, now, site.id]
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
+          [hash, site.id]
         );
       } else {
-        await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
+        await sendTelegramMessage(
+          chatId,
+          `✅ На <a href="${site.url}">${site.url}</a> изменений нет.`
+        );
       }
     } catch (err) {
-      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
+      await sendTelegramMessage(
+        chatId,
+        `❌ Ошибка при проверке <a href="${site.url}">${site.url}</a>: ${err.message}`
+      );
     }
   }
 }
+
 
 // 📩 отправка сообщений
 async function sendTelegramMessage(chatId, text, extra = {}) {
