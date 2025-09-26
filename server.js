@@ -106,11 +106,10 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         if (!selector) {
           try {
             const domain = new URL(url).hostname.replace("www.", "");
-            if (domain !== "youtube.com") {
-              selector = PRESET_SELECTORS[domain] || null;
-            }
+            selector = PRESET_SELECTORS[domain] || "body"; // 👈 всегда хотя бы body
           } catch (e) {
             console.error("❌ Ошибка при разборе URL:", e.message);
+            selector = "body"; // 👈 fallback
           }
         }
 
@@ -121,7 +120,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
         await sendTelegramMessage(
           chatId,
-          `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
+          `✅ Буду следить за: <b>${url}</b> (селектор: <code>${selector}</code>)`
         );
       }
     }
@@ -219,6 +218,7 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
     console.error("Ошибка отправки сообщения:", err);
   }
 }
+
 // 🧪 Тестовая страница для проверки бота
 app.get("/test", (req, res) => {
   res.send(`
