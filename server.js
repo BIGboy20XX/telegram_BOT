@@ -3,6 +3,7 @@ const express = require("express");
 const fetch = require("node-fetch");
 const crypto = require("crypto");
 const { Pool } = require("pg");
+const cheerio = require("cheerio"); // 🟢 добавили парсер HTML
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
@@ -20,6 +21,59 @@ const pool = new Pool({
 
 const app = express();
 app.use(express.json());
+
+// 📌 универсальная функция для выборки содержимого по селектору
+async function getContentBySelector(url, selector = "body") {
+  const res = await fetch(url);
+  const html = await res.text();
+  const $ = cheerio.load(html);
+  return $(selector).html() || ""; // только выбранный блок
+}
+
+// 🔍 ручная проверка
+async function checkUpdates(chatId) {
+  const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
+  if (sites.rows.length === 0) {
+    await sendTelegramMessage(chatId, "Нет сайтов для проверки. Добавь через /monitor <url>");
+    return;
+  }
+
+  for (const site of sites.rows) {
+    try {
+      // 🟢 теперь берём только содержимое блока (по умолчанию весь <body>)
+      const content = await getContentBySelector(site.url, site.selector || "body");
+      const hash = crypto.createHash("md5").update(content).digest("hex");
+
+      if (site.last_hash && site.last_hash !== hash) {
+        const now = new Date();
+        const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
+        await sendTelegramMessage(
+          chatId,
+          `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
+        );
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
+          [hash, site.id]
+        );
+      } else if (!site.last_hash) {
+        const now = new Date();
+        await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
+          [hash, now, site.id]
+        );
+      } else {
+        await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
+      }
+    } catch (err) {
+      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
+    }
+  }
+}
+
+// 📩 остальной код (обработка команд, отправка сообщений и т.д.)
+// оставляем как есть...
+
 
 // ---- helpers ----
 // Экранируем текст, который попадёт внутрь HTML (например, в тело ссылки)
