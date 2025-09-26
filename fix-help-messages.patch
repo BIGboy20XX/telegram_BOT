@@ -1,0 +1,77 @@
+--- a/server.js
++++ b/server.js
+@@
+ // === функции работы с Telegram ===
+ 
++// Хелпер для экранирования пользовательского текста
++function escapeHtml(text) {
++  if (!text) return "";
++  return text
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;");
++}
++
+ async function sendTelegramMessage(chatId, text) {
+   await fetch(`${TELEGRAM_API}/sendMessage`, {
+     method: "POST",
+@@
+       chat_id: chatId,
+       text: text,
+-      parse_mode: "HTML"
++      parse_mode: "HTML",
++      disable_web_page_preview: true
+     }),
+   });
+ }
+@@
+   } else if (text === "➕ Добавить сайт") {
+-    await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n/monitor <url>");
++    await sendTelegramMessage(
++      chatId,
++      "Чтобы добавить сайт, отправь команду, например:\n" +
++      "<code>/monitor https://example.com</code>\n" +
++      "Или с селектором:\n" +
++      "<code>/monitor https://example.com selector=.post-list</code>"
++    );
+   } else if (text === "ℹ️ Помощь") {
+-    await sendTelegramMessage(
+-      chatId,
+-      "📖 Доступные команды:\n\n" +
+-      "/monitor <url> — начать следить за страницей\n" +
+-      "/monitor <url> selector=<css> — следить за конкретным блоком\n" +
+-      "/list — список отслеживаемых сайтов\n" +
+-      "/remove <номер|url> — удалить сайт\n" +
+-      "🔍 Проверить обновления — вручную проверить изменения"
+-    );
++    await sendTelegramMessage(
++      chatId,
++      "📖 Доступные команды:\n\n" +
++      "<code>/monitor https://example.com</code> — начать следить за страницей\n" +
++      "<code>/monitor https://example.com selector=.post-list</code> — следить за конкретным блоком\n" +
++      "<code>/list</code> — список отслеживаемых сайтов\n" +
++      "<code>/remove 1</code> или <code>/remove https://example.com</code> — удалить сайт\n" +
++      "🔍 Проверить обновления — вручную проверить изменения"
++    );
+   }
+ }
+ 
+@@
+ async function monitorSite(chatId, url, selector = null) {
+   try {
+     if (!url) {
+-      await sendTelegramMessage(chatId, "Использование: /monitor <url>");
++      await sendTelegramMessage(chatId, "Использование: <code>/monitor https://example.com</code>");
+       return;
+     }
+ 
+@@
+     const user = await pool.query("SELECT * FROM users WHERE chat_id=$1", [chatId]);
+     if (!user.rows.length) {
+-      await sendTelegramMessage(chatId, "Сначала зарегистрируйся. Нет сайтов для проверки. Добавь через /monitor <url>");
++      await sendTelegramMessage(chatId,
++        "Сначала зарегистрируйся.\nДобавь сайт через:\n<code>/monitor https://example.com</code>"
++      );
+       return;
+     }

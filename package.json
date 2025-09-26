@@ -8,6 +8,7 @@
   "dependencies": {
     "cheerio": "^1.1.2",
     "express": "^4.18.2",
+    "nano": "^11.0.1",
     "node-fetch": "^2.6.7",
     "pg": "^8.11.3"
   }

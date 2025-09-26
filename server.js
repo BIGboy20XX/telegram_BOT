@@ -3,7 +3,6 @@ const express = require("express");
 const fetch = require("node-fetch");
 const crypto = require("crypto");
 const { Pool } = require("pg");
-const cheerio = require("cheerio"); // 👈 для работы с селекторами
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 if (!TELEGRAM_TOKEN) {
@@ -46,8 +45,8 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
             keyboard: [
               [{ text: "➕ Добавить сайт" }, { text: "📋 Список сайтов" }],
               [{ text: "🔍 Проверить обновления" }],
-              
-             [{ text: "ℹ️ Помощь" }]
+              [{ text: "⛔ Остановить мониторинг" }, { text: "▶️ Возобновить мониторинг" }],
+              [{ text: "ℹ️ Помощь" }]
             ],
             resize_keyboard: true
           }
@@ -55,19 +54,19 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       );
     }
     else if (text === "➕ Добавить сайт") {
-      await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n/monitor <url> [selector=<css-селектор>]");
+      await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n<b>/monitor https://example.com</b>");
     }
     else if (text === "📋 Список сайтов") {
       const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
       if (result.rows.length === 0) {
-        await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй /monitor <url>");
+        await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй <b>/monitor https://example.com</b>");
       } else {
         let msg = "📋 Сайты в мониторинге:\n";
         for (const [i, row] of result.rows.entries()) {
           const time = row.last_update
             ? new Date(row.last_update).toLocaleString("ru-RU", { timeZone: "Asia/Almaty" })
             : "—";
-          msg += `${i + 1}. ${row.url} ${row.selector ? `(селектор: ${row.selector})` : ""} (посл. изм: ${time})\n`;
+          msg += `${i + 1}. ${row.url} (посл. изм: ${time})\n`;
         }
         await sendTelegramMessage(chatId, msg);
       }
@@ -85,34 +84,24 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     }
     else if (text === "ℹ️ Помощь") {
       await sendTelegramMessage(
-  chatId,
-  "📖 Доступные команды:\n\n" +
-  "/monitor &lt;url&gt; — начать следить за страницей\n" +
-  "/monitor &lt;url&gt; selector=&lt;css&gt; — следить за конкретным блоком\n" +
-  "/list — список отслеживаемых сайтов\n" +
-  "/remove &lt;номер|url&gt; — удалить сайт\n" +
-  "🔍 Проверить обновления — вручную проверить изменения"
-);
-
+        chatId,
+        "📖 Доступные команды:\n\n" +
+        "<b>/monitor https://example.com</b> — начать следить за страницей\n" +
+        "<b>/list</b> — список отслеживаемых сайтов\n" +
+        "<b>/remove <номер|url></b> — удалить сайт\n\n" +
+        "Или используй кнопки меню 🙂"
+      );
     }
     else if (text.startsWith("/monitor ")) {
-      const parts = text.split(" ");
-      const url = parts[1];
-      let selector = null;
-
-      const selectorArg = parts.find(p => p.startsWith("selector="));
-      if (selectorArg) {
-        selector = selectorArg.replace("selector=", "").trim();
-      }
-
+      const url = text.split(" ")[1];
       if (!url) {
-        await sendTelegramMessage(chatId, "Использование: /monitor <url> [selector=<css-селектор>]");
+        await sendTelegramMessage(chatId, "Использование: <b>/monitor https://example.com</b>");
       } else {
         await pool.query(
-          "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
-          [chatId, url, selector]
+          "INSERT INTO sites (chat_id, url, last_hash, last_update) VALUES ($1,$2,'',NOW()) ON CONFLICT DO NOTHING",
+          [chatId, url]
         );
-        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: ${selector})` : ""}`);
+        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
       }
     }
     else if (text.startsWith("/remove ")) {
@@ -144,25 +133,15 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 async function checkUpdates(chatId) {
   const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   if (sites.rows.length === 0) {
-    await sendTelegramMessage(chatId, "Нет сайтов для проверки. Добавь через /monitor <url>");
+    await sendTelegramMessage(chatId, "Нет сайтов для проверки. Добавь через <b>/monitor https://example.com</b>");
     return;
   }
 
   for (const site of sites.rows) {
     try {
       const res = await fetch(site.url);
-      const html = await res.text();
-      let content;
-
-      if (site.selector) {
-        const $ = cheerio.load(html);
-        content = $(site.selector).text();
-      } else {
-        const $ = cheerio.load(html);
-        content = $("body").text(); // 👈 только текст без тегов
-      }
-
-      const hash = crypto.createHash("md5").update(content).digest("hex");
+      const text = await res.text();
+      const hash = crypto.createHash("md5").update(text).digest("hex");
 
       if (site.last_hash && site.last_hash !== hash) {
         const now = new Date();
