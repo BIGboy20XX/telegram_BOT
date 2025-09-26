@@ -219,6 +219,25 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
     console.error("Ошибка отправки сообщения:", err);
   }
 }
+// 🧪 Тестовая страница для проверки бота
+app.get("/test", (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+      <meta charset="UTF-8">
+      <title>Тестовая страница</title>
+    </head>
+    <body>
+      <h1>Тестовая страница</h1>
+      <div class="post-list">
+        <div class="post">Пост 1</div>
+        <div class="post">Пост 2</div>
+      </div>
+    </body>
+    </html>
+  `);
+});
 
 // 🚀 запуск сервера
 app.listen(PORT, async () => {
