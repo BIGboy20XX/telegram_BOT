@@ -48,7 +48,7 @@ const RSS_MIRRORS = {
   }
 };
 
-// 📩 Отправка сообщений (с кнопками по желанию)
+// 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
   try {
     const body = {
@@ -131,74 +131,8 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 Запускаем проверку каждые 2 минуты
+// 🕒 Автопроверка каждые 2 минуты
 setInterval(checkUpdates, 120000);
-
-// 📩 Вебхук Telegram
-app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  console.log("📩 Update:", JSON.stringify(req.body, null, 2));
-
-  const message = req.body.message;
-  if (!message || !message.text) return res.sendStatus(200);
-
-  const chatId = message.chat.id;
-  const text = message.text;
-
-  // 👉 стартовое меню
-  if (text === "/start") {
-    await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
-      reply_markup: {
-        keyboard: [
-          [{ text: "➕ Добавить сайт" }],
-          [{ text: "📋 Мои сайты" }],
-          [{ text: "❌ Удалить сайт" }],
-          [{ text: "🔄 Проверить обновления" }]
-        ],
-        resize_keyboard: true
-      }
-    });
-  }
-
-  // 👉 ручная проверка
-  else if (text === "🔄 Проверить обновления") {
-    await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
-    await manualCheckUpdates(chatId);
-    await sendTelegramMessage(chatId, "✅ Проверка завершена!");
-  }
-
-  // 👉 добавление сайта через команду
-  else if (text.startsWith("/monitor ")) {
-    const args = text.split(" ");
-    const url = args[1];
-    const selectorArg = args.find(a => a.startsWith("selector="));
-    let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
-
-    if (!url) {
-      await sendTelegramMessage(chatId, "Использование: /monitor <url> [selector=...]");
-    } else {
-      try {
-        const domain = new URL(url).hostname.replace("www.", "");
-        if (!selector) {
-          selector = PRESET_SELECTORS[domain] || null;
-        }
-
-        await pool.query(
-          "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
-          [chatId, url, selector]
-        );
-
-        await sendTelegramMessage(
-          chatId,
-          `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
-        );
-      } catch (e) {
-        await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
-      }
-    }
-  }
-
-  res.sendStatus(200);
-});
 
 // 📌 Ручная проверка только для одного пользователя
 async function manualCheckUpdates(chatId) {
@@ -222,13 +156,97 @@ async function manualCheckUpdates(chatId) {
       }
     } catch (err) {
       await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
-      
     }
   }
 }
+
+// 📩 Вебхук Telegram
+app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
+  console.log("📩 Update:", JSON.stringify(req.body, null, 2));
+
+  // 👉 обработка inline-кнопок
+  if (req.body.callback_query) {
+    const chatId = req.body.callback_query.message.chat.id;
+    const data = req.body.callback_query.data;
+
+    if (data === "check_updates") {
+      await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
+      await manualCheckUpdates(chatId);
+      await sendTelegramMessage(chatId, "✅ Проверка завершена!");
+    }
+
+    if (data === "add_site") {
+      await sendTelegramMessage(chatId, "Введите команду: /monitor <url> [selector=...]");
+    }
+
+    if (data === "list_sites") {
+      const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
+      if (result.rows.length === 0) {
+        await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.");
+      } else {
+        const list = result.rows.map(r => `• ${r.url}`).join("\n");
+        await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}`);
+      }
+    }
+
+    if (data === "delete_site") {
+      await sendTelegramMessage(chatId, "Удаление пока доступно только через команду: /delete <url>");
+    }
+  }
+
+  // 👉 обработка обычных сообщений
+  const message = req.body.message;
+  if (message && message.text) {
+    const chatId = message.chat.id;
+    const text = message.text;
+
+    if (text === "/start") {
+      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
+        inline_keyboard: [
+          [{ text: "➕ Добавить сайт", callback_data: "add_site" }],
+          [{ text: "📋 Мои сайты", callback_data: "list_sites" }],
+          [{ text: "❌ Удалить сайт", callback_data: "delete_site" }],
+          [{ text: "🔄 Проверить обновления", callback_data: "check_updates" }]
+        ]
+      });
+    }
+
+    else if (text.startsWith("/monitor ")) {
+      const args = text.split(" ");
+      const url = args[1];
+      const selectorArg = args.find(a => a.startsWith("selector="));
+      let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
+
+      if (!url) {
+        await sendTelegramMessage(chatId, "Использование: /monitor <url> [selector=...]");
+      } else {
+        try {
+          const domain = new URL(url).hostname.replace("www.", "");
+          if (!selector) {
+            selector = PRESET_SELECTORS[domain] || null;
+          }
+
+          await pool.query(
+            "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
+            [chatId, url, selector]
+          );
+
+          await sendTelegramMessage(
+            chatId,
+            `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
+          );
+        } catch (e) {
+          await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
+        }
+      }
+    }
+  }
+
+  res.sendStatus(200);
+});
+
 // 🚀 Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 });
-
