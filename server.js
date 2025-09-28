@@ -1,294 +1,172 @@
-// server.js
-const express = require("express");
-const fetch = require("node-fetch");
-const crypto = require("crypto");
-const { Pool } = require("pg");
-const cheerio = require("cheerio");
+import express from "express";
+import fetch from "node-fetch";
+import cheerio from "cheerio";
+import crypto from "crypto";
+import { Pool } from "pg";
+import bodyParser from "body-parser";
+import Parser from "rss-parser";
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-if (!TELEGRAM_TOKEN) {
-  console.error("❌ Ошибка: TELEGRAM_TOKEN не задан в переменных окружения!");
-  process.exit(1);
-}
-
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-const PORT = process.env.PORT || 3000;
+const app = express();
+app.use(bodyParser.json());
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-const app = express();
-app.use(express.json());
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-// ============================
-// 🛠️ Вспомогательная функция
-// ============================
-async function getPageContent(url, selector = null) {
-  const res = await fetch(url, {
-    headers: { "User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)" }
-  });
-  const html = await res.text();
-  const $ = cheerio.load(html);
+const rssParser = new Parser();
 
-  let content;
+// 🔧 Предустановленные селекторы
+const PRESET_SELECTORS = {
+  "instagram.com": ".x1lliihq",   // посты
+  "twitter.com": "article",       // твиты
+  "reddit.com": ".Post",          // посты
+  "tumblr.com": ".post"           // посты
+};
 
-  // 🎯 Специальные правила для соцсетей
-  if (url.includes("instagram.com")) {
-    content = $("article").html();
-  } else if (url.includes("twitter.com") || url.includes("x.com")) {
-    content = $("article, .tweet, [data-testid='tweet']").html();
-  } else if (url.includes("reddit.com")) {
-    content = $("div.Post").html();
-  } else if (url.includes("tumblr.com")) {
-    content = $("article, .post").html();
-  } else if (selector) {
-    content = $(selector).html();
-  } else {
-    content = $.root().html();
+// 🔧 RSS-зеркала
+const RSS_MIRRORS = {
+  "twitter.com": url => {
+    const username = url.split("/").filter(Boolean).pop();
+    return `https://nitter.net/${username}/rss`;
+  },
+  "x.com": url => {
+    const username = url.split("/").filter(Boolean).pop();
+    return `https://nitter.net/${username}/rss`;
+  },
+  "instagram.com": url => {
+    const username = url.split("/").filter(Boolean).pop();
+    return `https://rsshub.app/instagram/user/${username}`;
+  },
+  "reddit.com": url => {
+    return url.endsWith("/") ? `${url}.rss` : `${url}/.rss`;
   }
+};
 
-  return content || html;
+// 📨 Отправка сообщений
+async function sendTelegramMessage(chatId, text) {
+  await fetch(`${TELEGRAM_API}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML"
+    })
+  });
 }
 
-// ============================
-// 📩 Обработка входящих апдейтов
-// ============================
-app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  const update = req.body;
-  console.log("📩 Пришло обновление:", JSON.stringify(update, null, 2));
+// 📌 Проверка обновлений
+async function checkUpdates() {
+  const res = await pool.query("SELECT * FROM sites");
+  for (const row of res.rows) {
+    const { chat_id, url, selector, last_hash } = row;
 
-  if (update.message && update.message.text) {
-    const chatId = String(update.message.chat.id);
-    const text = update.message.text.trim();
+    try {
+      const domain = new URL(url).hostname.replace("www.", "");
 
-    if (text === "/start") {
-      await pool.query(
-        "INSERT INTO users (chat_id, monitoring) VALUES ($1,true) ON CONFLICT (chat_id) DO NOTHING",
-        [chatId]
-      );
+      // 1) Если есть RSS-зеркало → берём его
+      if (RSS_MIRRORS[domain]) {
+        const rssUrl = RSS_MIRRORS[domain](url);
+        const feed = await rssParser.parseURL(rssUrl);
 
-      await sendTelegramMessage(
-        chatId,
-        "👋 Привет! Я бот для мониторинга сайтов.\n\nВыбери действие:",
-        {
-          reply_markup: {
-            keyboard: [
-              [{ text: "➕ Добавить сайт" }, { text: "📋 Список сайтов" }],
-              [{ text: "🔍 Проверить обновления" }],
-              [{ text: "ℹ️ Помощь" }]
-            ],
-            resize_keyboard: true
+        if (feed.items && feed.items.length > 0) {
+          const latestItem = feed.items[0];
+          const contentToHash = latestItem.link || latestItem.title;
+          const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
+
+          if (hash !== last_hash) {
+            await pool.query(
+              "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+              [hash, chat_id, url]
+            );
+
+            await sendTelegramMessage(
+              chat_id,
+              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n${latestItem.link}`
+            );
           }
         }
-      );
-    }
-
-    else if (text === "➕ Добавить сайт") {
-      await sendTelegramMessage(
-        chatId,
-        "Чтобы добавить сайт, напиши:\n<b>/monitor https://example.com</b>\nили с селектором:\n<b>/monitor https://example.com selector=.post-list</b>"
-      );
-    }
-
-    else if (text === "📋 Список сайтов") {
-      const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
-      if (result.rows.length === 0) {
-        await sendTelegramMessage(chatId, "Сайтов для мониторинга нет. Используй <b>/monitor https://example.com</b>");
       } else {
-        let msg = "📋 Сайты в мониторинге:\n";
-        for (const [i, row] of result.rows.entries()) {
-          const time = row.last_update
-            ? new Date(row.last_update).toLocaleString("ru-RU", { timeZone: "Asia/Almaty" })
-            : "—";
-          msg += `${i + 1}. ${row.url} (посл. изм: ${time})\n`;
+        // 2) Fallback: HTML + селектор
+        const response = await fetch(url);
+        const html = await response.text();
+        const $ = cheerio.load(html);
+
+        let elements;
+        if (selector) {
+          elements = $(selector);
+        } else {
+          elements = $(PRESET_SELECTORS[domain] || "body");
         }
-        await sendTelegramMessage(chatId, msg);
+
+        const content = elements.text().trim().slice(0, 500);
+        const hash = crypto.createHash("md5").update(content).digest("hex");
+
+        if (hash !== last_hash) {
+          await pool.query(
+            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+            [hash, chat_id, url]
+          );
+
+          await sendTelegramMessage(
+            chat_id,
+            `🔔 Обновление на <b>${url}</b>`
+          );
+        }
       }
+    } catch (err) {
+      console.error(`Ошибка проверки ${url}:`, err.message);
     }
+  }
+}
 
-    else if (text === "🔍 Проверить обновления") {
-      await checkUpdates(chatId);
-    }
+// 🕒 Запускаем проверку каждые 2 минуты
+setInterval(checkUpdates, 120000);
 
-    else if (text === "ℹ️ Помощь") {
-      await sendTelegramMessage(
-        chatId,
-        "📖 Доступные команды:\n\n" +
-          "<b>/monitor https://example.com</b> — начать следить за страницей\n" +
-          "<b>/monitor https://example.com selector=.post-list</b> — следить за частью страницы\n" +
-          "<b>/list</b> — список отслеживаемых сайтов\n" +
-          "<b>/remove [номер или url]</b> — удалить сайт\n\n" +
-          "Или используй кнопки меню 🙂"
-      );
-    }
+// 📩 Вебхук Telegram
+app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
+  const message = req.body.message;
+  if (!message || !message.text) return res.sendStatus(200);
 
-    else if (text.startsWith("/monitor ")) {
-      const parts = text.split(" ");
-      const url = parts[1];
-      const selector = parts[2]?.startsWith("selector=") ? parts[2].split("=")[1] : null;
+  const chatId = message.chat.id;
+  const text = message.text;
 
-      if (!url) {
-        await sendTelegramMessage(chatId, "Использование: <b>/monitor https://example.com</b>");
-      } else {
+  if (text.startsWith("/monitor ")) {
+    const args = text.split(" ");
+    const url = args[1];
+    const selectorArg = args.find(a => a.startsWith("selector="));
+    let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
+
+    if (!url) {
+      await sendTelegramMessage(chatId, "Использование: /monitor <url> [selector=...]");
+    } else {
+      try {
+        const domain = new URL(url).hostname.replace("www.", "");
+        if (!selector) {
+          selector = PRESET_SELECTORS[domain] || null;
+        }
+
         await pool.query(
           "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
           [chatId, url, selector]
         );
-        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
-      }
-    }
 
-    else if (text.startsWith("/remove ")) {
-      const param = text.split(" ")[1];
-      const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
-      let removed = false;
-
-      if (/^\d+$/.test(param)) {
-        const idx = parseInt(param, 10) - 1;
-        if (result.rows[idx]) {
-          await pool.query("DELETE FROM sites WHERE id=$1", [result.rows[idx].id]);
-          removed = true;
-        }
-      } else {
-        const row = result.rows.find(r => r.url === param);
-        if (row) {
-          await pool.query("DELETE FROM sites WHERE id=$1", [row.id]);
-          removed = true;
-        }
+        await sendTelegramMessage(
+          chatId,
+          `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
+        );
+      } catch (e) {
+        await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
       }
-      await sendTelegramMessage(chatId, removed ? "✅ Удалено" : "❌ Не найдено");
     }
   }
 
   res.sendStatus(200);
 });
 
-// 🔍 функция ручной проверки
-async function checkUpdates(chatId) {
-  const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
-  if (sites.rows.length === 0) {
-    await sendTelegramMessage(chatId, "Нет сайтов для проверки. Добавь через <b>/monitor https://example.com</b>");
-    return;
-  }
-
-  for (const site of sites.rows) {
-    try {
-      const res = await fetch(site.url, {
-        headers: {
-          // маскируемся под браузер, чтобы Instagram не блочил
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-        }
-      });
-      const html = await res.text();
-      let content = html;
-
-      // 🔧 спец-обработка Instagram
-      if (site.url.includes("instagram.com")) {
-        const $ = cheerio.load(html);
-        let posts = [];
-
-        // основной блок с постами
-        $(".x1lliihq").each((i, el) => {
-          let postHtml = $(el).html() || "";
-
-          // очищаем от динамических параметров
-          postHtml = postHtml
-            .replace(/data-[a-zA-Z0-9_-]+="[^"]*"/g, "") // убираем data-атрибуты
-            .replace(/id="[^"]*"/g, ""); // убираем id-шники
-
-          posts.push(postHtml);
-        });
-
-        content = posts.join("\n"); // берём только посты
-      }
-      else if (site.selector) {
-        // обычная логика для других сайтов
-        const $ = cheerio.load(html);
-        content = $(site.selector).html() || "";
-      }
-
-      const hash = crypto.createHash("md5").update(content).digest("hex");
-
-      if (site.last_hash && site.last_hash !== hash) {
-        const now = new Date();
-        const formatted = now.toLocaleString("ru-RU", { timeZone: "Asia/Almaty" });
-        await sendTelegramMessage(
-          chatId,
-          `⚡ Обновление на <b>${site.url}</b>\n🕒 Время: ${formatted}`
-        );
-        await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
-          [hash, site.id]
-        );
-      } else if (!site.last_hash) {
-        const now = new Date();
-        await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
-        await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
-          [hash, now, site.id]
-        );
-      } else {
-        await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
-      }
-    } catch (err) {
-      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${site.url}</b>: ${err.message}`);
-    }
-  }
-}
-
-// ============================
-// 📩 Отправка сообщений в Telegram
-// ============================
-async function sendTelegramMessage(chatId, text, extra = {}) {
-  try {
-    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true,
-        ...extra
-      })
-    });
-
-    const data = await res.json();
-    console.log("Ответ Telegram:", data);
-  } catch (err) {
-    console.error("Ошибка отправки сообщения:", err);
-  }
-}
-// 🧪 Тестовая страница для проверки бота
-app.get("/test", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-      <meta charset="UTF-8">
-      <title>Тестовая страница</title>
-    </head>
-    <body>
-      <h1>Тестовая страница</h1>
-      <div class="post-list">
-        <div class="post">Пост 1</div>
-        
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-// ============================
-// 🚀 Запуск сервера
-// ============================
-app.listen(PORT, async () => {
-  console.log(`✅ Сервер запущен на порту ${PORT}`);
-
-  const url = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
-  const res = await fetch(`${TELEGRAM_API}/setWebhook?url=${url}`);
-  const data = await res.json();
-  console.log("🌍 Webhook ответ:", data);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Сервер запущен на порту ${PORT}`));
