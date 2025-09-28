@@ -19,26 +19,24 @@ const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 const rssParser = new Parser();
 
-// 🔧 Предустановленные селекторы
+// 🔧 Предустановленные селекторы (если RSS недоступен)
 const PRESET_SELECTORS = {
-  "instagram.com": ".x1lliihq",   // посты
-  "twitter.com": "article",       // твиты
-  "reddit.com": ".Post",          // посты
-  "tumblr.com": ".post"           // посты
+  "reddit.com": ".Post",
+  "tumblr.com": ".post"
 };
 
 // 🔧 RSS-зеркала
 const RSS_MIRRORS = {
   "twitter.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
+    const username = url.split("/").filter(Boolean)[3];
     return `https://nitter.net/${username}/rss`;
   },
   "x.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
+    const username = url.split("/").filter(Boolean)[3];
     return `https://nitter.net/${username}/rss`;
   },
   "instagram.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
+    const username = url.split("/").filter(Boolean)[3];
     return `https://rsshub.app/instagram/user/${username}`;
   },
   "reddit.com": url => {
@@ -68,7 +66,7 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
 
-      // 1) Если есть RSS-зеркало → берём его
+      // 1) Если сайт поддерживает RSS
       if (RSS_MIRRORS[domain]) {
         const rssUrl = RSS_MIRRORS[domain](url);
         const feed = await rssParser.parseURL(rssUrl);
@@ -86,13 +84,15 @@ async function checkUpdates() {
 
             await sendTelegramMessage(
               chat_id,
-              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n${latestItem.link}`
+              `🔔 Новый пост на <b>${url}</b>\n\n${latestItem.title || ""}\n${latestItem.link || ""}`
             );
           }
         }
       } else {
-        // 2) Fallback: HTML + селектор
+        // 2) Если RSS нет → парсим HTML
         const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
         const html = await response.text();
         const $ = cheerio.load(html);
 
@@ -146,7 +146,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     } else {
       try {
         const domain = new URL(url).hostname.replace("www.", "");
-        if (!selector) {
+
+        // если у домена есть RSS → селектор не нужен
+        if (!selector && !RSS_MIRRORS[domain]) {
           selector = PRESET_SELECTORS[domain] || null;
         }
 
@@ -157,7 +159,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
         await sendTelegramMessage(
           chatId,
-          `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
+          `✅ Буду следить за: <b>${url}</b>${
+            selector ? ` (селектор: <code>${selector}</code>)` : " (RSS)"
+          }`
         );
       } catch (e) {
         await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
