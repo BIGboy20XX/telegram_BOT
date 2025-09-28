@@ -169,47 +169,66 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const chatId = req.body.callback_query.message.chat.id;
     const data = req.body.callback_query.data;
 
-    if (data === "check_updates") {
-      await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
-      await manualCheckUpdates(chatId);
-      await sendTelegramMessage(chatId, "✅ Проверка завершена!");
-    }
+    // 👉 обработка inline-кнопок
+if (req.body.callback_query) {
+  const chatId = req.body.callback_query.message.chat.id;
+  const data = req.body.callback_query.data;
 
-    if (data === "add_site") {
-      await sendTelegramMessage(chatId, "Введите команду: /monitor <url> [selector=...]");
-    }
+  if (data === "check_updates") {
+    await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
+    await manualCheckUpdates(chatId);
+    await sendTelegramMessage(chatId, "✅ Проверка завершена!");
+  }
 
-    if (data === "list_sites") {
-      const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
-      if (result.rows.length === 0) {
-        await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.");
-      } else {
-        const list = result.rows.map(r => `• ${r.url}`).join("\n");
-        await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}`);
-      }
-    }
+  if (data === "add_site") {
+    await sendTelegramMessage(chatId, "Введите команду: /monitor <url> [selector=...]");
+  }
 
-    if (data === "delete_site") {
-      await sendTelegramMessage(chatId, "Удаление пока доступно только через команду: /delete <url>");
+  if (data === "list_sites") {
+    const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
+    if (result.rows.length === 0) {
+      await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.");
+    } else {
+      const list = result.rows.map(r => `• ${r.url}`).join("\n");
+      await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}`);
     }
   }
 
-  // 👉 обработка обычных сообщений
-  const message = req.body.message;
-  if (message && message.text) {
-    const chatId = message.chat.id;
-    const text = message.text;
+  if (data === "delete_site") {
+    await sendTelegramMessage(chatId, "Удаление пока доступно только через команду: /delete <url>");
+  }
 
-    if (text === "/start") {
-      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
-        inline_keyboard: [
-          [{ text: "➕ Добавить сайт", callback_data: "add_site" }],
-          [{ text: "📋 Мои сайты", callback_data: "list_sites" }],
-          [{ text: "❌ Удалить сайт", callback_data: "delete_site" }],
-          [{ text: "🔄 Проверить обновления", callback_data: "check_updates" }]
-        ]
-      });
-    }
+  if (data === "help") {
+    await sendTelegramMessage(chatId, 
+      "ℹ️ Справка по командам:\n\n" +
+      "• /start — открыть меню\n" +
+      "• /monitor <url> [selector=...] — добавить сайт для мониторинга\n" +
+      "• 🔄 Проверить обновления — ручная проверка сайтов\n" +
+      "• 📋 Мои сайты — список ваших сайтов\n" +
+      "• ❌ Удалить сайт — удалить сайт из списка (временно только через /delete <url>)\n" +
+      "• ℹ️ Помощь — показать это сообщение"
+    );
+  }
+}
+
+// 👉 обработка обычных сообщений
+if (message && message.text) {
+  const chatId = message.chat.id;
+  const text = message.text;
+
+  if (text === "/start") {
+    await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
+      inline_keyboard: [
+        [{ text: "➕ Добавить сайт", callback_data: "add_site" }],
+        [{ text: "📋 Мои сайты", callback_data: "list_sites" }],
+        [{ text: "❌ Удалить сайт", callback_data: "delete_site" }],
+        [{ text: "🔄 Проверить обновления", callback_data: "check_updates" }],
+        [{ text: "ℹ️ Помощь", callback_data: "help" }]
+      ]
+    });
+  }
+}
+
 
     else if (text.startsWith("/monitor ")) {
       const args = text.split(" ");
