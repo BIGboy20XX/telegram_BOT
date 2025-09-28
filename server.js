@@ -8,14 +8,6 @@ import Parser from "rss-parser";
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// 🛡️ Глобальный перехват ошибок
-process.on("uncaughtException", err => {
-  console.error("❌ uncaughtException:", err);
-});
-process.on("unhandledRejection", err => {
-  console.error("❌ unhandledRejection:", err);
-});
-
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
@@ -27,7 +19,6 @@ if (!TELEGRAM_TOKEN) {
   process.exit(1);
 }
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-
 const rssParser = new Parser();
 
 // 🔧 Предустановленные селекторы
@@ -57,20 +48,27 @@ const RSS_MIRRORS = {
   }
 };
 
-// 📩 Отправка сообщений
-async function sendTelegramMessage(chatId, text) {
+// 📩 Отправка сообщений (с кнопками по желанию)
+async function sendTelegramMessage(chatId, text, keyboard = null) {
   try {
+    const body = {
+      chat_id: chatId,
+      text,
+      parse_mode: "HTML"
+    };
+    if (keyboard) {
+      body.reply_markup = keyboard;
+    }
+
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: "HTML"
-      })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
-    if (!data.ok) console.error("❌ Ошибка при отправке:", data);
+    if (!data.ok) {
+      console.error("❌ Ошибка при отправке:", data);
+    }
   } catch (err) {
     console.error("❌ Ошибка fetch:", err.message);
   }
@@ -85,7 +83,6 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
 
-      // 1) RSS-зеркало
       if (RSS_MIRRORS[domain]) {
         const rssUrl = RSS_MIRRORS[domain](url);
         const feed = await rssParser.parseURL(rssUrl);
@@ -108,12 +105,7 @@ async function checkUpdates() {
           }
         }
       } else {
-        // 2) Fallback: HTML + селектор
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000); // ⏳ 10 сек
-        const response = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeout);
-
+        const response = await fetch(url);
         const html = await response.text();
         const $ = cheerio.load(html);
 
@@ -127,7 +119,10 @@ async function checkUpdates() {
             [hash, chat_id, url]
           );
 
-          await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
+          await sendTelegramMessage(
+            chat_id,
+            `🔔 Обновление на <b>${url}</b>`
+          );
         }
       }
     } catch (err) {
@@ -136,10 +131,10 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 каждые 2 минуты
+// 🕒 Запускаем проверку каждые 2 минуты
 setInterval(checkUpdates, 120000);
 
-// 📩 Вебхук
+// 📩 Вебхук Telegram
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   console.log("📩 Update:", JSON.stringify(req.body, null, 2));
 
@@ -149,7 +144,30 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const chatId = message.chat.id;
   const text = message.text;
 
-  if (text.startsWith("/monitor ")) {
+  // 👉 стартовое меню
+  if (text === "/start") {
+    await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
+      reply_markup: {
+        keyboard: [
+          [{ text: "➕ Добавить сайт" }],
+          [{ text: "📋 Мои сайты" }],
+          [{ text: "❌ Удалить сайт" }],
+          [{ text: "🔄 Проверить обновления" }]
+        ],
+        resize_keyboard: true
+      }
+    });
+  }
+
+  // 👉 ручная проверка
+  else if (text === "🔄 Проверить обновления") {
+    await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
+    await manualCheckUpdates(chatId);
+    await sendTelegramMessage(chatId, "✅ Проверка завершена!");
+  }
+
+  // 👉 добавление сайта через команду
+  else if (text.startsWith("/monitor ")) {
     const args = text.split(" ");
     const url = args[1];
     const selectorArg = args.find(a => a.startsWith("selector="));
@@ -160,7 +178,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     } else {
       try {
         const domain = new URL(url).hostname.replace("www.", "");
-        if (!selector) selector = PRESET_SELECTORS[domain] || null;
+        if (!selector) {
+          selector = PRESET_SELECTORS[domain] || null;
+        }
 
         await pool.query(
           "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
@@ -180,19 +200,28 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// 🚀 Запуск сервера
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", async () => {
-  console.log(`✅ Сервер запущен на 0.0.0.0:${PORT}`);
+// 📌 Ручная проверка только для одного пользователя
+async function manualCheckUpdates(chatId) {
+  const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
+  for (const row of res.rows) {
+    try {
+      const domain = new URL(row.url).hostname.replace("www.", "");
+      let updated = false;
 
-  const webhookUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
-  console.log("🌍 Устанавливаю вебхук:", webhookUrl);
+      if (RSS_MIRRORS[domain]) {
+        const rssUrl = RSS_MIRRORS[domain](row.url);
+        const feed = await rssParser.parseURL(rssUrl);
+        if (feed.items && feed.items.length > 0) {
+          await sendTelegramMessage(chatId, `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n${feed.items[0].link}`);
+          updated = true;
+        }
+      }
 
-  try {
-    const res = await fetch(`${TELEGRAM_API}/setWebhook?url=${webhookUrl}`);
-    const data = await res.json();
-    console.log("Ответ Telegram на setWebhook:", data);
-  } catch (err) {
-    console.error("❌ Ошибка установки вебхука:", err.message);
+      if (!updated) {
+        await sendTelegramMessage(chatId, `ℹ️ Данных по <b>${row.url}</b> не найдено.`);
+      }
+    } catch (err) {
+      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
+    }
   }
-});
+}
