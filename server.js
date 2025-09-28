@@ -1,6 +1,6 @@
 import express from "express";
 import fetch from "node-fetch";
-import cheerio from "cheerio";
+import * as cheerio from "cheerio";
 import crypto from "crypto";
 import { Pool } from "pg";
 import bodyParser from "body-parser";
