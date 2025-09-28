@@ -222,12 +222,13 @@ async function manualCheckUpdates(chatId) {
       }
     } catch (err) {
       await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
-      // 🚀 Запуск сервера
+      
+    }
+  }
+}
+// 🚀 Запуск сервера
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 });
 
-    }
-  }
-}
