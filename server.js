@@ -165,9 +165,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// ============================
-// 🔍 Проверка обновлений
-// ============================
+// 🔍 функция ручной проверки
 async function checkUpdates(chatId) {
   const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   if (sites.rows.length === 0) {
@@ -177,7 +175,40 @@ async function checkUpdates(chatId) {
 
   for (const site of sites.rows) {
     try {
-      const content = await getPageContent(site.url, site.selector);
+      const res = await fetch(site.url, {
+        headers: {
+          // маскируемся под браузер, чтобы Instagram не блочил
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+      });
+      const html = await res.text();
+      let content = html;
+
+      // 🔧 спец-обработка Instagram
+      if (site.url.includes("instagram.com")) {
+        const $ = cheerio.load(html);
+        let posts = [];
+
+        // основной блок с постами
+        $(".x1lliihq").each((i, el) => {
+          let postHtml = $(el).html() || "";
+
+          // очищаем от динамических параметров
+          postHtml = postHtml
+            .replace(/data-[a-zA-Z0-9_-]+="[^"]*"/g, "") // убираем data-атрибуты
+            .replace(/id="[^"]*"/g, ""); // убираем id-шники
+
+          posts.push(postHtml);
+        });
+
+        content = posts.join("\n"); // берём только посты
+      }
+      else if (site.selector) {
+        // обычная логика для других сайтов
+        const $ = cheerio.load(html);
+        content = $(site.selector).html() || "";
+      }
+
       const hash = crypto.createHash("md5").update(content).digest("hex");
 
       if (site.last_hash && site.last_hash !== hash) {
@@ -192,10 +223,11 @@ async function checkUpdates(chatId) {
           [hash, site.id]
         );
       } else if (!site.last_hash) {
+        const now = new Date();
         await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
         await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
-          [hash, site.id]
+          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
+          [hash, now, site.id]
         );
       } else {
         await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
