@@ -22,15 +22,39 @@ const pool = new Pool({
 const app = express();
 app.use(express.json());
 
-// 🔧 предустановленные селекторы
-const PRESET_SELECTORS = {
-  "instagram.com": ".x1lliihq",   // блок с постами
-  "twitter.com": "article",       // твиты
-  "reddit.com": ".Post",          // посты
-  "tumblr.com": "article"         // посты в Tumblr
-};
+// ============================
+// 🛠️ Вспомогательная функция
+// ============================
+async function getPageContent(url, selector = null) {
+  const res = await fetch(url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; Bot/1.0)" }
+  });
+  const html = await res.text();
+  const $ = cheerio.load(html);
 
-// 📩 обработка сообщений от Telegram
+  let content;
+
+  // 🎯 Специальные правила для соцсетей
+  if (url.includes("instagram.com")) {
+    content = $("article").html();
+  } else if (url.includes("twitter.com") || url.includes("x.com")) {
+    content = $("article, .tweet, [data-testid='tweet']").html();
+  } else if (url.includes("reddit.com")) {
+    content = $("div.Post").html();
+  } else if (url.includes("tumblr.com")) {
+    content = $("article, .post").html();
+  } else if (selector) {
+    content = $(selector).html();
+  } else {
+    content = $.root().html();
+  }
+
+  return content || html;
+}
+
+// ============================
+// 📩 Обработка входящих апдейтов
+// ============================
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   const update = req.body;
   console.log("📩 Пришло обновление:", JSON.stringify(update, null, 2));
@@ -60,9 +84,14 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         }
       );
     }
+
     else if (text === "➕ Добавить сайт") {
-      await sendTelegramMessage(chatId, "Чтобы добавить сайт, напиши:\n<b>/monitor https://example.com</b>");
+      await sendTelegramMessage(
+        chatId,
+        "Чтобы добавить сайт, напиши:\n<b>/monitor https://example.com</b>\nили с селектором:\n<b>/monitor https://example.com selector=.post-list</b>"
+      );
     }
+
     else if (text === "📋 Список сайтов") {
       const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
       if (result.rows.length === 0) {
@@ -73,57 +102,44 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
           const time = row.last_update
             ? new Date(row.last_update).toLocaleString("ru-RU", { timeZone: "Asia/Almaty" })
             : "—";
-          msg += `${i + 1}. ${row.url}${row.selector ? ` (селектор: ${row.selector})` : ""} (посл. изм: ${time})\n`;
+          msg += `${i + 1}. ${row.url} (посл. изм: ${time})\n`;
         }
         await sendTelegramMessage(chatId, msg);
       }
     }
+
     else if (text === "🔍 Проверить обновления") {
       await checkUpdates(chatId);
     }
+
     else if (text === "ℹ️ Помощь") {
       await sendTelegramMessage(
         chatId,
         "📖 Доступные команды:\n\n" +
-        "<b>/monitor https://example.com</b> — следить за страницей целиком\n" +
-        "<b>/monitor https://example.com selector=.post-list</b> — следить только за частью страницы\n\n" +
-        "Автоматически поддерживаются сайты:\n" +
-        "• Instagram\n• Twitter\n• Reddit\n• Tumblr\n\n" +
-        "<b>/list</b> — список сайтов\n" +
-        "<b>/remove [номер или url]</b> — удалить сайт"
+          "<b>/monitor https://example.com</b> — начать следить за страницей\n" +
+          "<b>/monitor https://example.com selector=.post-list</b> — следить за частью страницы\n" +
+          "<b>/list</b> — список отслеживаемых сайтов\n" +
+          "<b>/remove [номер или url]</b> — удалить сайт\n\n" +
+          "Или используй кнопки меню 🙂"
       );
     }
+
     else if (text.startsWith("/monitor ")) {
-      const args = text.split(" ");
-      const url = args[1];
-      const selectorArg = args.find(a => a.startsWith("selector="));
-      let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
+      const parts = text.split(" ");
+      const url = parts[1];
+      const selector = parts[2]?.startsWith("selector=") ? parts[2].split("=")[1] : null;
 
       if (!url) {
-        await sendTelegramMessage(chatId, "Использование: <b>/monitor https://example.com [selector=...]</b>");
+        await sendTelegramMessage(chatId, "Использование: <b>/monitor https://example.com</b>");
       } else {
-        // автоопределение по домену
-        if (!selector) {
-          try {
-            const domain = new URL(url).hostname.replace("www.", "");
-            selector = PRESET_SELECTORS[domain] || "body"; // 👈 всегда хотя бы body
-          } catch (e) {
-            console.error("❌ Ошибка при разборе URL:", e.message);
-            selector = "body"; // 👈 fallback
-          }
-        }
-
         await pool.query(
           "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
           [chatId, url, selector]
         );
-
-        await sendTelegramMessage(
-          chatId,
-          `✅ Буду следить за: <b>${url}</b> (селектор: <code>${selector}</code>)`
-        );
+        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`);
       }
     }
+
     else if (text.startsWith("/remove ")) {
       const param = text.split(" ")[1];
       const result = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
@@ -149,7 +165,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// 🔍 функция ручной проверки
+// ============================
+// 🔍 Проверка обновлений
+// ============================
 async function checkUpdates(chatId) {
   const sites = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   if (sites.rows.length === 0) {
@@ -159,15 +177,7 @@ async function checkUpdates(chatId) {
 
   for (const site of sites.rows) {
     try {
-      const res = await fetch(site.url);
-      const html = await res.text();
-      let content = html;
-
-      if (site.selector) {
-        const $ = cheerio.load(html);
-        content = $(site.selector).html() || "";
-      }
-
+      const content = await getPageContent(site.url, site.selector);
       const hash = crypto.createHash("md5").update(content).digest("hex");
 
       if (site.last_hash && site.last_hash !== hash) {
@@ -182,11 +192,10 @@ async function checkUpdates(chatId) {
           [hash, site.id]
         );
       } else if (!site.last_hash) {
-        const now = new Date();
         await sendTelegramMessage(chatId, `🔍 Начал мониторинг: <b>${site.url}</b>`);
         await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=$2 WHERE id=$3",
-          [hash, now, site.id]
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE id=$2",
+          [hash, site.id]
         );
       } else {
         await sendTelegramMessage(chatId, `✅ На <b>${site.url}</b> изменений нет.`);
@@ -197,7 +206,9 @@ async function checkUpdates(chatId) {
   }
 }
 
-// 📩 отправка сообщений
+// ============================
+// 📩 Отправка сообщений в Telegram
+// ============================
 async function sendTelegramMessage(chatId, text, extra = {}) {
   try {
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
@@ -219,29 +230,9 @@ async function sendTelegramMessage(chatId, text, extra = {}) {
   }
 }
 
-// 🧪 Тестовая страница для проверки бота
-app.get("/test", (req, res) => {
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-      <meta charset="UTF-8">
-      <title>Тестовая страница</title>
-    </head>
-    <body>
-      <h1>Тестовая страница</h1>
-      <div class="post-list">
-        <div class="post">Пост 1</div>
-        <div class="post">Пост 2</div>
-        <div class="post">Пост 3</div>
-       
-      </div>
-    </body>
-    </html>
-  `);
-});
-
-// 🚀 запуск сервера
+// ============================
+// 🚀 Запуск сервера
+// ============================
 app.listen(PORT, async () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 
