@@ -242,8 +242,7 @@ app.get("/test", (req, res) => {
       <h1>Тестовая страница</h1>
       <div class="post-list">
         <div class="post">Пост 1</div>
-        <div class="post">Пост 2</div>
-        <div class="post">Пост 3</div>
+        
       </div>
     </body>
     </html>
