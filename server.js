@@ -3,11 +3,10 @@ import fetch from "node-fetch";
 import * as cheerio from "cheerio";
 import crypto from "crypto";
 import { Pool } from "pg";
-import bodyParser from "body-parser";
 import Parser from "rss-parser";
 
 const app = express();
-app.use(bodyParser.json());
+app.use(express.json({ limit: "2mb" })); // поддержка больших апдейтов
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -15,28 +14,34 @@ const pool = new Pool({
 });
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
+if (!TELEGRAM_TOKEN) {
+  console.error("❌ Ошибка: TELEGRAM_TOKEN не задан!");
+  process.exit(1);
+}
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
 const rssParser = new Parser();
 
-// 🔧 Предустановленные селекторы (если RSS недоступен)
+// 🔧 Предустановленные селекторы
 const PRESET_SELECTORS = {
-  "reddit.com": ".Post",
-  "tumblr.com": ".post"
+  "instagram.com": ".x1lliihq", // посты
+  "twitter.com": "article",     // твиты
+  "reddit.com": ".Post",        // посты
+  "tumblr.com": ".post"         // посты
 };
 
 // 🔧 RSS-зеркала
 const RSS_MIRRORS = {
   "twitter.com": url => {
-    const username = url.split("/").filter(Boolean)[3];
+    const username = url.split("/").filter(Boolean).pop();
     return `https://nitter.net/${username}/rss`;
   },
   "x.com": url => {
-    const username = url.split("/").filter(Boolean)[3];
+    const username = url.split("/").filter(Boolean).pop();
     return `https://nitter.net/${username}/rss`;
   },
   "instagram.com": url => {
-    const username = url.split("/").filter(Boolean)[3];
+    const username = url.split("/").filter(Boolean).pop();
     return `https://rsshub.app/instagram/user/${username}`;
   },
   "reddit.com": url => {
@@ -44,17 +49,25 @@ const RSS_MIRRORS = {
   }
 };
 
-// 📨 Отправка сообщений
+// 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text) {
-  await fetch(`${TELEGRAM_API}/sendMessage`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML"
-    })
-  });
+  try {
+    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "HTML"
+      })
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      console.error("❌ Ошибка при отправке:", data);
+    }
+  } catch (err) {
+    console.error("❌ Ошибка fetch:", err.message);
+  }
 }
 
 // 📌 Проверка обновлений
@@ -66,7 +79,7 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
 
-      // 1) Если сайт поддерживает RSS
+      // 1) Если есть RSS-зеркало → берём его
       if (RSS_MIRRORS[domain]) {
         const rssUrl = RSS_MIRRORS[domain](url);
         const feed = await rssParser.parseURL(rssUrl);
@@ -84,15 +97,13 @@ async function checkUpdates() {
 
             await sendTelegramMessage(
               chat_id,
-              `🔔 Новый пост на <b>${url}</b>\n\n${latestItem.title || ""}\n${latestItem.link || ""}`
+              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n${latestItem.link}`
             );
           }
         }
       } else {
-        // 2) Если RSS нет → парсим HTML
+        // 2) Fallback: HTML + селектор
         const response = await fetch(url);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
         const html = await response.text();
         const $ = cheerio.load(html);
 
@@ -119,7 +130,7 @@ async function checkUpdates() {
         }
       }
     } catch (err) {
-      console.error(`Ошибка проверки ${url}:`, err.message);
+      console.error(`❌ Ошибка проверки ${url}:`, err.message);
     }
   }
 }
@@ -129,6 +140,8 @@ setInterval(checkUpdates, 120000);
 
 // 📩 Вебхук Telegram
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
+  console.log("📩 Update:", JSON.stringify(req.body, null, 2));
+
   const message = req.body.message;
   if (!message || !message.text) return res.sendStatus(200);
 
@@ -146,9 +159,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     } else {
       try {
         const domain = new URL(url).hostname.replace("www.", "");
-
-        // если у домена есть RSS → селектор не нужен
-        if (!selector && !RSS_MIRRORS[domain]) {
+        if (!selector) {
           selector = PRESET_SELECTORS[domain] || null;
         }
 
@@ -159,9 +170,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
         await sendTelegramMessage(
           chatId,
-          `✅ Буду следить за: <b>${url}</b>${
-            selector ? ` (селектор: <code>${selector}</code>)` : " (RSS)"
-          }`
+          `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
         );
       } catch (e) {
         await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
@@ -172,5 +181,19 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
+// 🚀 Запуск сервера + установка вебхука
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`✅ Сервер запущен на порту ${PORT}`));
+app.listen(PORT, async () => {
+  console.log(`✅ Сервер запущен на порту ${PORT}`);
+
+  const webhookUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
+  console.log("🌍 Устанавливаю вебхук:", webhookUrl);
+
+  try {
+    const res = await fetch(`${TELEGRAM_API}/setWebhook?url=${webhookUrl}`);
+    const data = await res.json();
+    console.log("Ответ Telegram на setWebhook:", data);
+  } catch (err) {
+    console.error("❌ Ошибка установки вебхука:", err.message);
+  }
+});
