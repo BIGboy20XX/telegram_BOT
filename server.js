@@ -6,7 +6,15 @@ import { Pool } from "pg";
 import Parser from "rss-parser";
 
 const app = express();
-app.use(express.json({ limit: "2mb" })); // поддержка больших апдейтов
+app.use(express.json({ limit: "2mb" }));
+
+// 🛡️ Глобальный перехват ошибок
+process.on("uncaughtException", err => {
+  console.error("❌ uncaughtException:", err);
+});
+process.on("unhandledRejection", err => {
+  console.error("❌ unhandledRejection:", err);
+});
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -24,10 +32,10 @@ const rssParser = new Parser();
 
 // 🔧 Предустановленные селекторы
 const PRESET_SELECTORS = {
-  "instagram.com": ".x1lliihq", // посты
-  "twitter.com": "article",     // твиты
-  "reddit.com": ".Post",        // посты
-  "tumblr.com": ".post"         // посты
+  "instagram.com": ".x1lliihq",
+  "twitter.com": "article",
+  "reddit.com": ".Post",
+  "tumblr.com": ".post"
 };
 
 // 🔧 RSS-зеркала
@@ -62,9 +70,7 @@ async function sendTelegramMessage(chatId, text) {
       })
     });
     const data = await res.json();
-    if (!data.ok) {
-      console.error("❌ Ошибка при отправке:", data);
-    }
+    if (!data.ok) console.error("❌ Ошибка при отправке:", data);
   } catch (err) {
     console.error("❌ Ошибка fetch:", err.message);
   }
@@ -79,7 +85,7 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
 
-      // 1) Если есть RSS-зеркало → берём его
+      // 1) RSS-зеркало
       if (RSS_MIRRORS[domain]) {
         const rssUrl = RSS_MIRRORS[domain](url);
         const feed = await rssParser.parseURL(rssUrl);
@@ -103,17 +109,15 @@ async function checkUpdates() {
         }
       } else {
         // 2) Fallback: HTML + селектор
-        const response = await fetch(url);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000); // ⏳ 10 сек
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeout);
+
         const html = await response.text();
         const $ = cheerio.load(html);
 
-        let elements;
-        if (selector) {
-          elements = $(selector);
-        } else {
-          elements = $(PRESET_SELECTORS[domain] || "body");
-        }
-
+        let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
         const content = elements.text().trim().slice(0, 500);
         const hash = crypto.createHash("md5").update(content).digest("hex");
 
@@ -123,10 +127,7 @@ async function checkUpdates() {
             [hash, chat_id, url]
           );
 
-          await sendTelegramMessage(
-            chat_id,
-            `🔔 Обновление на <b>${url}</b>`
-          );
+          await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
         }
       }
     } catch (err) {
@@ -135,10 +136,10 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 Запускаем проверку каждые 2 минуты
+// 🕒 каждые 2 минуты
 setInterval(checkUpdates, 120000);
 
-// 📩 Вебхук Telegram
+// 📩 Вебхук
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   console.log("📩 Update:", JSON.stringify(req.body, null, 2));
 
@@ -159,9 +160,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     } else {
       try {
         const domain = new URL(url).hostname.replace("www.", "");
-        if (!selector) {
-          selector = PRESET_SELECTORS[domain] || null;
-        }
+        if (!selector) selector = PRESET_SELECTORS[domain] || null;
 
         await pool.query(
           "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
@@ -181,10 +180,10 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   res.sendStatus(200);
 });
 
-// 🚀 Запуск сервера + установка вебхука
+// 🚀 Запуск сервера
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  console.log(`✅ Сервер запущен на порту ${PORT}`);
+app.listen(PORT, "0.0.0.0", async () => {
+  console.log(`✅ Сервер запущен на 0.0.0.0:${PORT}`);
 
   const webhookUrl = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}/webhook/${TELEGRAM_TOKEN}`;
   console.log("🌍 Устанавливаю вебхук:", webhookUrl);
