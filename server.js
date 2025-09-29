@@ -48,39 +48,17 @@ const RSS_MIRRORS = {
   }
 };
 
-// 🔧 Постоянная клавиатура
-const MAIN_KEYBOARD = {
-  keyboard: [
-    [{ text: "➕ Добавить сайт" }, { text: "📋 Мои сайты" }],
-    [{ text: "❌ Удалить сайт" }, { text: "🔄 Проверить обновления" }],
-    [{ text: "ℹ️ Помощь" }]
-  ],
-  resize_keyboard: true
-};
-
-// 🔧 Безопасный fetch
-async function safeFetch(url) {
-  try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15000); // 15 сек
-    const res = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) throw new Error(`Status ${res.status}`);
-    return await res.text();
-  } catch (err) {
-    throw new Error(`Fetch error: ${err.message}`);
-  }
-}
-
 // 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
   try {
     const body = {
       chat_id: chatId,
       text,
-      parse_mode: "HTML",
-      reply_markup: keyboard || MAIN_KEYBOARD
+      parse_mode: "HTML"
     };
+    if (keyboard) {
+      body.reply_markup = keyboard;
+    }
 
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
@@ -127,7 +105,8 @@ async function checkUpdates() {
           }
         }
       } else {
-        const html = await safeFetch(url);
+        const response = await fetch(url);
+        const html = await response.text();
         const $ = cheerio.load(html);
 
         let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
@@ -152,8 +131,8 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 Автопроверка каждые 5 минуты
-setInterval(checkUpdates, 150000);
+// 🕒 Автопроверка каждые 2 минуты
+setInterval(checkUpdates, 120000);
 
 // 📌 Ручная проверка
 async function manualCheckUpdates(chatId) {
@@ -190,73 +169,92 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
     const chatId = message.chat.id;
     const text = message.text.trim();
 
+    const mainKeyboard = {
+      keyboard: [
+        ["➕ Добавить сайт", "📋 Мои сайты"],
+        ["❌ Удалить сайт", "🔄 Проверить обновления"],
+        ["ℹ️ Помощь"]
+      ],
+      resize_keyboard: true
+    };
+
     if (text === "/start") {
-      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nКнопки снизу помогут управлять мной!");
-    }
-
-    else if (text === "🔄 Проверить обновления") {
-      await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
-      await manualCheckUpdates(chatId);
-      await sendTelegramMessage(chatId, "✅ Проверка завершена!");
-    }
-
-    else if (text === "➕ Добавить сайт") {
-      await sendTelegramMessage(chatId, "Введите команду:\n<code>/monitor &lt;url&gt; [selector=...]</code>");
+      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", mainKeyboard);
     }
 
     else if (text === "📋 Мои сайты") {
       const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
       if (result.rows.length === 0) {
-        await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.");
+        await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.", mainKeyboard);
       } else {
-        const list = result.rows.map(r => `• <code>${r.url}</code>`).join("\n");
-        await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}`);
+        const list = result.rows.map((r, i) => `${i + 1}. <code>${r.url}</code>`).join("\n");
+        await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}\n\nДля удаления введите номер сайта после выбора «❌ Удалить сайт».`, mainKeyboard);
       }
     }
 
     else if (text === "❌ Удалить сайт") {
-      await sendTelegramMessage(chatId, "Удаление пока доступно только через команду:\n<code>/delete &lt;url&gt;</code>");
+      await sendTelegramMessage(chatId, "Введите номер сайта, который хотите удалить (сначала посмотрите список через «📋 Мои сайты»).", mainKeyboard);
+    }
+
+    else if (/^\d+$/.test(text)) {
+      const index = parseInt(text);
+      const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
+      if (index > 0 && index <= result.rows.length) {
+        const urlToDelete = result.rows[index - 1].url;
+        await pool.query("DELETE FROM sites WHERE chat_id=$1 AND url=$2", [chatId, urlToDelete]);
+        await sendTelegramMessage(chatId, `❌ Сайт <code>${urlToDelete}</code> удалён.`, mainKeyboard);
+      }
+    }
+
+    else if (text === "🔄 Проверить обновления") {
+      await sendTelegramMessage(chatId, "⏳ Проверяю сайты...", mainKeyboard);
+      await manualCheckUpdates(chatId);
+      await sendTelegramMessage(chatId, "✅ Проверка завершена!", mainKeyboard);
     }
 
     else if (text === "ℹ️ Помощь") {
       await sendTelegramMessage(chatId,
         "ℹ️ Справка по командам:\n\n" +
         "• <b>/start</b> — открыть меню\n" +
-        "• <b>/monitor &lt;url&gt; [selector=...]</b> — добавить сайт для мониторинга\n" +
-        "• 🔄 Проверить обновления — ручная проверка сайтов\n" +
-        "• 📋 Мои сайты — список ваших сайтов\n" +
-        "• ❌ Удалить сайт — удалить сайт из списка (или через <b>/delete &lt;url&gt;</b>)\n" +
-        "• ℹ️ Помощь — показать это сообщение"
-      );
+        "• <b>➕ Добавить сайт</b> — добавить сайт для мониторинга\n" +
+        "• <b>📋 Мои сайты</b> — список ваших сайтов\n" +
+        "• <b>❌ Удалить сайт</b> — удалить сайт по номеру\n" +
+        "• <b>🔄 Проверить обновления</b> — ручная проверка сайтов\n" +
+        "• <b>ℹ️ Помощь</b> — показать это сообщение", mainKeyboard);
     }
 
-    else if (text.startsWith("/monitor ")) {
-      const args = text.split(" ");
-      const url = args[1];
-      const selectorArg = args.find(a => a.startsWith("selector="));
-      let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
+    else if (text.startsWith("/monitor ") || text.startsWith("➕ Добавить сайт")) {
+      if (text.startsWith("/monitor ")) {
+        const args = text.split(" ");
+        const url = args[1];
+        const selectorArg = args.find(a => a.startsWith("selector="));
+        let selector = selectorArg ? selectorArg.replace("selector=", "") : null;
 
-      if (!url) {
-        await sendTelegramMessage(chatId, "Использование:\n<code>/monitor &lt;url&gt; [selector=...]</code>");
-      } else {
-        try {
-          const domain = new URL(url).hostname.replace("www.", "");
-          if (!selector) {
-            selector = PRESET_SELECTORS[domain] || null;
+        if (!url) {
+          await sendTelegramMessage(chatId, "Использование:\n<code>/monitor &lt;url&gt; [selector=...]</code>", mainKeyboard);
+        } else {
+          try {
+            const domain = new URL(url).hostname.replace("www.", "");
+            if (!selector) {
+              selector = PRESET_SELECTORS[domain] || null;
+            }
+
+            await pool.query(
+              "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
+              [chatId, url, selector]
+            );
+
+            await sendTelegramMessage(
+              chatId,
+              `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`,
+              mainKeyboard
+            );
+          } catch (e) {
+            await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL", mainKeyboard);
           }
-
-          await pool.query(
-            "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
-            [chatId, url, selector]
-          );
-
-          await sendTelegramMessage(
-            chatId,
-            `✅ Буду следить за: <b>${url}</b>${selector ? ` (селектор: <code>${selector}</code>)` : ""}`
-          );
-        } catch (e) {
-          await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL");
         }
+      } else {
+        await sendTelegramMessage(chatId, "Введите команду в формате:\n<code>/monitor &lt;url&gt; [selector=...]</code>", mainKeyboard);
       }
     }
   }
