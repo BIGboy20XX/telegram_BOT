@@ -131,8 +131,8 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 Автопроверка каждые 2 минуты
-setInterval(checkUpdates, 120000);
+// 🕒 Автопроверка каждые 4 минуты
+setInterval(checkUpdates, 140000);
 
 // 📌 Ручная проверка
 async function manualCheckUpdates(chatId) {
