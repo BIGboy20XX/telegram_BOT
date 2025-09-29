@@ -48,17 +48,39 @@ const RSS_MIRRORS = {
   }
 };
 
+// 🔧 Постоянная клавиатура
+const MAIN_KEYBOARD = {
+  keyboard: [
+    [{ text: "➕ Добавить сайт" }, { text: "📋 Мои сайты" }],
+    [{ text: "❌ Удалить сайт" }, { text: "🔄 Проверить обновления" }],
+    [{ text: "ℹ️ Помощь" }]
+  ],
+  resize_keyboard: true
+};
+
+// 🔧 Безопасный fetch
+async function safeFetch(url) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000); // 15 сек
+    const res = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return await res.text();
+  } catch (err) {
+    throw new Error(`Fetch error: ${err.message}`);
+  }
+}
+
 // 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
   try {
     const body = {
       chat_id: chatId,
       text,
-      parse_mode: "HTML"
+      parse_mode: "HTML",
+      reply_markup: keyboard || MAIN_KEYBOARD
     };
-    if (keyboard) {
-      body.reply_markup = keyboard;
-    }
 
     const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
       method: "POST",
@@ -105,8 +127,7 @@ async function checkUpdates() {
           }
         }
       } else {
-        const response = await fetch(url);
-        const html = await response.text();
+        const html = await safeFetch(url);
         const $ = cheerio.load(html);
 
         let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
@@ -131,8 +152,8 @@ async function checkUpdates() {
   }
 }
 
-// 🕒 Автопроверка каждые 2 минуты
-setInterval(checkUpdates, 120000);
+// 🕒 Автопроверка каждые 5 минуты
+setInterval(checkUpdates, 150000);
 
 // 📌 Ручная проверка
 async function manualCheckUpdates(chatId) {
@@ -164,22 +185,26 @@ async function manualCheckUpdates(chatId) {
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
   console.log("📩 Update:", JSON.stringify(req.body, null, 2));
 
-  // 👉 inline кнопки
-  if (req.body.callback_query) {
-    const chatId = req.body.callback_query.message.chat.id;
-    const data = req.body.callback_query.data;
+  if (req.body.message && req.body.message.text) {
+    const message = req.body.message;
+    const chatId = message.chat.id;
+    const text = message.text.trim();
 
-    if (data === "check_updates") {
+    if (text === "/start") {
+      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nКнопки снизу помогут управлять мной!");
+    }
+
+    else if (text === "🔄 Проверить обновления") {
       await sendTelegramMessage(chatId, "⏳ Проверяю сайты...");
       await manualCheckUpdates(chatId);
       await sendTelegramMessage(chatId, "✅ Проверка завершена!");
     }
 
-    if (data === "add_site") {
+    else if (text === "➕ Добавить сайт") {
       await sendTelegramMessage(chatId, "Введите команду:\n<code>/monitor &lt;url&gt; [selector=...]</code>");
     }
 
-    if (data === "list_sites") {
+    else if (text === "📋 Мои сайты") {
       const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
       if (result.rows.length === 0) {
         await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.");
@@ -189,11 +214,11 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       }
     }
 
-    if (data === "delete_site") {
+    else if (text === "❌ Удалить сайт") {
       await sendTelegramMessage(chatId, "Удаление пока доступно только через команду:\n<code>/delete &lt;url&gt;</code>");
     }
 
-    if (data === "help") {
+    else if (text === "ℹ️ Помощь") {
       await sendTelegramMessage(chatId,
         "ℹ️ Справка по командам:\n\n" +
         "• <b>/start</b> — открыть меню\n" +
@@ -203,25 +228,6 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         "• ❌ Удалить сайт — удалить сайт из списка (или через <b>/delete &lt;url&gt;</b>)\n" +
         "• ℹ️ Помощь — показать это сообщение"
       );
-    }
-  }
-
-  // 👉 обычные сообщения
-  if (req.body.message && req.body.message.text) {
-    const message = req.body.message;
-    const chatId = message.chat.id;
-    const text = message.text;
-
-    if (text === "/start") {
-      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", {
-        inline_keyboard: [
-          [{ text: "➕ Добавить сайт", callback_data: "add_site" }],
-          [{ text: "📋 Мои сайты", callback_data: "list_sites" }],
-          [{ text: "❌ Удалить сайт", callback_data: "delete_site" }],
-          [{ text: "🔄 Проверить обновления", callback_data: "check_updates" }],
-          [{ text: "ℹ️ Помощь", callback_data: "help" }]
-        ]
-      });
     }
 
     else if (text.startsWith("/monitor ")) {
