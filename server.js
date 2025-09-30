@@ -302,6 +302,23 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
 // 🚀 Запуск сервера
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
+
+  // 🔹 Добавляем тестовый сайт при первом запуске
+  try {
+    await pool.query(
+      "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
+      [0, "https://example.com", "body"]
+    );
+    console.log("🔧 Тестовый сайт https://example.com добавлен в базу (chat_id=0).");
+  } catch (err) {
+    console.error("❌ Ошибка при добавлении тестового сайта:", err.message);
+  }
+
+  // 🔹 Запускаем тестовую проверку сразу при старте
+  console.log("⏳ Выполняю тестовую проверку...");
+  await checkUpdates();
+  console.log("✅ Тестовая проверка завершена!");
 });
+
