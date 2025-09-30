@@ -92,7 +92,7 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений (с поддержкой зеркал)
+// 📌 Проверка обновлений (с диагностикой и расширенным контентом)
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
@@ -102,36 +102,30 @@ async function checkUpdates() {
       const domain = new URL(url).hostname.replace("www.", "");
 
       if (RSS_MIRRORS[domain]) {
-        let feed = null;
-        const mirrors = RSS_MIRRORS[domain](url);
+        try {
+          const rssUrl = RSS_MIRRORS[domain](url);
+          const feed = await rssParser.parseURL(rssUrl);
 
-        for (const mirror of mirrors) {
-          try {
-            feed = await rssParser.parseURL(mirror);
-            console.log(`✅ Успешно сработало зеркало: ${mirror}`);
-            break;
-          } catch (rssErr) {
-            console.error(`⚠️ Зеркало ${mirror} недоступно:`, rssErr.message);
-          }
-        }
+          if (feed.items && feed.items.length > 0) {
+            const latestItem = feed.items[0];
+            const contentToHash = (latestItem.link || "") + (latestItem.title || "");
+            const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
 
-        if (feed && feed.items && feed.items.length > 0) {
-          const latestItem = feed.items[0];
-          const contentToHash = (latestItem.title || "") + (latestItem.pubDate || "") + (latestItem.link || "");
-          const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
+            if (hash !== last_hash) {
+              await pool.query(
+                "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+                [hash, chat_id, url]
+              );
 
-          if (hash !== last_hash) {
-            await pool.query(
-              "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-              [hash, chat_id, url]
-            );
-
-            await sendTelegramMessage(
-              chat_id,
-              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
-            );
+              await sendTelegramMessage(
+                chat_id,
+                `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
+              );
+            }
           }
           continue;
+        } catch (rssErr) {
+          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
         }
       }
 
@@ -150,8 +144,21 @@ async function checkUpdates() {
       const html = await response.text();
       const $ = cheerio.load(html);
 
+      // Выбираем контент
       let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
-      const content = elements.text().trim().slice(0, 500);
+
+      // Текст + ссылки (увеличена длина контента)
+      const content = (
+        elements.text().trim() +
+        elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ")
+      ).slice(0, 5000); // теперь до 5000 символов
+
+      // Логирование для диагностики
+      console.log(`👀 Проверка ${url}`);
+      console.log("➡️ Используем селектор:", selector || PRESET_SELECTORS[domain] || "body");
+      console.log("📄 Извлечённый контент:", content.slice(0, 300) + "...");
+
+      // Хеширование
       const hash = crypto.createHash("md5").update(content).digest("hex");
 
       if (hash !== last_hash) {
@@ -171,6 +178,7 @@ async function checkUpdates() {
     }
   }
 }
+
 
 // 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
