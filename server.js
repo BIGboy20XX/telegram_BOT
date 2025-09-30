@@ -71,54 +71,84 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений
+// 📌 Проверка обновлений (с защитой от падения зеркал)
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
     const { chat_id, url, selector, last_hash } = row;
+
     try {
       const domain = new URL(url).hostname.replace("www.", "");
-      // RSS
+
       if (RSS_MIRRORS[domain]) {
-        const rssUrl = RSS_MIRRORS[domain](url);
-        const feed = await rssParser.parseURL(rssUrl);
-        if (feed.items && feed.items.length > 0) {
-          const latestItem = feed.items[0];
-          const contentToHash = latestItem.link || latestItem.title;
-          const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
-          if (hash !== last_hash) {
-            await pool.query(
-              "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-              [hash, chat_id, url]
-            );
-            await sendTelegramMessage(
-              chat_id,
-              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
-            );
+        // 🔄 Попытка взять через зеркало
+        try {
+          const rssUrl = RSS_MIRRORS[domain](url);
+          const feed = await rssParser.parseURL(rssUrl);
+
+          if (feed.items && feed.items.length > 0) {
+            const latestItem = feed.items[0];
+            const contentToHash = latestItem.link || latestItem.title;
+            const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
+
+            if (hash !== last_hash) {
+              await pool.query(
+                "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+                [hash, chat_id, url]
+              );
+
+              await sendTelegramMessage(
+                chat_id,
+                `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
+              );
+            }
           }
+        } catch (rssErr) {
+          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
+          await sendTelegramMessage(
+            chat_id,
+            `⚠️ Источник <b>${url}</b> временно недоступен. Попробуй позже.`
+          );
         }
       } else {
-        // Обычный сайт
-        const response = await fetch(url);
+        // 🌐 Для обычных сайтов — прямой fetch
+        const response = await fetch(url, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
         const html = await response.text();
         const $ = cheerio.load(html);
+
         let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
         const content = elements.text().trim().slice(0, 500);
         const hash = crypto.createHash("md5").update(content).digest("hex");
+
         if (hash !== last_hash) {
           await pool.query(
             "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
             [hash, chat_id, url]
           );
+
           await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
         }
       }
     } catch (err) {
       console.error(`❌ Ошибка проверки ${url}:`, err.message);
-      await sendTelegramMessage(row.chat_id, `❌ Сайт <b>${url}</b> недоступен.`);
+      await sendTelegramMessage(
+        row.chat_id,
+        `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`
+      );
     }
   }
 }
+
 
 // 🕒 Автопроверка каждые 4 минуты
 setInterval(checkUpdates, 240000);
