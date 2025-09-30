@@ -21,21 +21,21 @@ if (!TELEGRAM_TOKEN) {
 const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const rssParser = new Parser();
 
+// Предустановленные селекторы
 const PRESET_SELECTORS = {
-  "instagram.com": ".x1lliihq",
-  "twitter.com": "article",
   "reddit.com": ".Post",
   "tumblr.com": ".post"
 };
 
+// RSS-зеркала через RSSHub
 const RSS_MIRRORS = {
   "twitter.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://nitter.net/${username}/rss`;
+    return `https://rsshub.app/twitter/user/${username}`;
   },
   "x.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://nitter.net/${username}/rss`;
+    return `https://rsshub.app/twitter/user/${username}`;
   },
   "instagram.com": url => {
     const username = url.split("/").filter(Boolean).pop();
@@ -71,7 +71,7 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений (с защитой от падения зеркал)
+// 📌 Проверка обновлений
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
@@ -81,7 +81,6 @@ async function checkUpdates() {
       const domain = new URL(url).hostname.replace("www.", "");
 
       if (RSS_MIRRORS[domain]) {
-        // 🔄 Попытка взять через зеркало
         try {
           const rssUrl = RSS_MIRRORS[domain](url);
           const feed = await rssParser.parseURL(rssUrl);
@@ -104,24 +103,19 @@ async function checkUpdates() {
             }
           }
         } catch (rssErr) {
-          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
-          await sendTelegramMessage(
-            chat_id,
-            `⚠️ Источник <b>${url}</b> временно недоступен. Попробуй позже.`
-          );
+          console.error(`⚠️ Ошибка RSSHub ${url}:`, rssErr.message);
+          await sendTelegramMessage(chat_id, `⚠ Источник временно недоступен: <b>${url}</b>`);
         }
       } else {
-        // 🌐 Для обычных сайтов — прямой fetch
+        // 🌐 Обычные сайты
         const response = await fetch(url, {
           headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0",
             "Accept-Language": "en-US,en;q=0.9"
           }
         });
 
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const html = await response.text();
         const $ = cheerio.load(html);
@@ -141,19 +135,15 @@ async function checkUpdates() {
       }
     } catch (err) {
       console.error(`❌ Ошибка проверки ${url}:`, err.message);
-      await sendTelegramMessage(
-        row.chat_id,
-        `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`
-      );
+      await sendTelegramMessage(row.chat_id, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
     }
   }
 }
 
-
 // 🕒 Автопроверка каждые 4 минуты
 setInterval(checkUpdates, 240000);
 
-// 📌 Ручная проверка только для одного пользователя
+// 📌 Ручная проверка
 async function manualCheckUpdates(chatId) {
   const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   for (const row of res.rows) {
@@ -169,72 +159,30 @@ async function manualCheckUpdates(chatId) {
           if (feed.items && feed.items.length > 0) {
             await sendTelegramMessage(
               chatId,
-              `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n${feed.items[0].link}`
+              `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
             );
             updated = true;
           }
         } catch (rssErr) {
-          await sendTelegramMessage(
-            chatId,
-            `⚠ Источник временно недоступен для <b>${row.url}</b>`
-          );
-          continue; // переходим к следующему сайту
+          console.error(`⚠️ Ошибка RSSHub ${row.url}:`, rssErr.message);
+          await sendTelegramMessage(chatId, `⚠ Источник временно недоступен: <b>${row.url}</b>`);
+          continue;
         }
       }
 
       if (!updated) {
-        try {
-          const response = await fetch(row.url);
-          if (!response.ok) {
-            await sendTelegramMessage(
-              chatId,
-              `⚠ Источник временно недоступен для <b>${row.url}</b>`
-            );
-            continue;
-          }
-
-          const html = await response.text();
-          const $ = cheerio.load(html);
-
-          let elements = row.selector
-            ? $(row.selector)
-            : $(PRESET_SELECTORS[domain] || "body");
-          const content = elements.text().trim().slice(0, 500);
-
-          if (content) {
-            await sendTelegramMessage(
-              chatId,
-              `🔔 Проверка <b>${row.url}</b> завершена.\nФрагмент:\n${content}`
-            );
-          } else {
-            await sendTelegramMessage(
-              chatId,
-              `ℹ️ Данных по <b>${row.url}</b> не найдено.`
-            );
-          }
-        } catch (httpErr) {
-          await sendTelegramMessage(
-            chatId,
-            `⚠ Ошибка при проверке <b>${row.url}</b>: ${httpErr.message}`
-          );
-        }
+        await sendTelegramMessage(chatId, `ℹ️ Данных по <b>${row.url}</b> не найдено.`);
       }
     } catch (err) {
-      await sendTelegramMessage(
-        chatId,
-        `❌ Ошибка при обработке <b>${row.url}</b>: ${err.message}`
-      );
+      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
     }
   }
 }
 
-
 // 📩 Вебхук Telegram
-const waitingForURL = {}; // состояние "ожидаем URL"
+const waitingForURL = {};
 
 app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  console.log("📩 Update:", JSON.stringify(req.body, null, 2));
-
   if (req.body.message && req.body.message.text) {
     const message = req.body.message;
     const chatId = message.chat.id;
@@ -258,7 +206,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
           [chatId, url, selector]
         );
         await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`, mainKeyboard);
-      } catch (e) {
+      } catch {
         await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL", mainKeyboard);
       }
       delete waitingForURL[chatId];
@@ -267,9 +215,7 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
 
     if (text === "/start") {
       await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", mainKeyboard);
-    }
-
-    else if (text === "📋 Мои сайты") {
+    } else if (text === "📋 Мои сайты") {
       const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
       if (result.rows.length === 0) {
         await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.", mainKeyboard);
@@ -277,13 +223,9 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         const list = result.rows.map((r, i) => `${i + 1}. <code>${r.url}</code>`).join("\n");
         await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}\n\nДля удаления введите номер сайта после выбора «❌ Удалить сайт».`, mainKeyboard);
       }
-    }
-
-    else if (text === "❌ Удалить сайт") {
-      await sendTelegramMessage(chatId, "Введите номер сайта, который хотите удалить (сначала посмотрите список через «📋 Мои сайты»).", mainKeyboard);
-    }
-
-    else if (/^\d+$/.test(text)) {
+    } else if (text === "❌ Удалить сайт") {
+      await sendTelegramMessage(chatId, "Введите номер сайта, который хотите удалить.", mainKeyboard);
+    } else if (/^\d+$/.test(text)) {
       const index = parseInt(text);
       const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
       if (index > 0 && index <= result.rows.length) {
@@ -293,15 +235,11 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
       } else {
         await sendTelegramMessage(chatId, "❌ Неверный номер сайта.", mainKeyboard);
       }
-    }
-
-    else if (text === "🔄 Проверить обновления") {
+    } else if (text === "🔄 Проверить обновления") {
       await sendTelegramMessage(chatId, "⏳ Проверяю сайты...", mainKeyboard);
       await manualCheckUpdates(chatId);
       await sendTelegramMessage(chatId, "✅ Проверка завершена!", mainKeyboard);
-    }
-
-    else if (text === "ℹ️ Помощь") {
+    } else if (text === "ℹ️ Помощь") {
       await sendTelegramMessage(chatId,
         "ℹ️ Справка по командам:\n\n" +
         "• <b>/start</b> — открыть меню\n" +
@@ -310,14 +248,11 @@ app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
         "• <b>❌ Удалить сайт</b> — удалить сайт по номеру\n" +
         "• <b>🔄 Проверить обновления</b> — ручная проверка сайтов\n" +
         "• <b>ℹ️ Помощь</b> — показать это сообщение", mainKeyboard);
-    }
-
-    else if (text === "➕ Добавить сайт") {
+    } else if (text === "➕ Добавить сайт") {
       waitingForURL[chatId] = true;
       await sendTelegramMessage(chatId, "Введите URL сайта для мониторинга:", mainKeyboard);
     }
   }
-
   res.sendStatus(200);
 });
 
