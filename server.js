@@ -153,31 +153,81 @@ async function checkUpdates() {
 // 🕒 Автопроверка каждые 4 минуты
 setInterval(checkUpdates, 240000);
 
-// 📌 Ручная проверка
+// 📌 Ручная проверка только для одного пользователя
 async function manualCheckUpdates(chatId) {
   const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   for (const row of res.rows) {
     try {
       const domain = new URL(row.url).hostname.replace("www.", "");
+      let updated = false;
+
       if (RSS_MIRRORS[domain]) {
-        const rssUrl = RSS_MIRRORS[domain](row.url);
-        const feed = await rssParser.parseURL(rssUrl);
-        if (feed.items && feed.items.length > 0) {
-          await sendTelegramMessage(chatId, `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`);
+        try {
+          const rssUrl = RSS_MIRRORS[domain](row.url);
+          const feed = await rssParser.parseURL(rssUrl);
+
+          if (feed.items && feed.items.length > 0) {
+            await sendTelegramMessage(
+              chatId,
+              `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n${feed.items[0].link}`
+            );
+            updated = true;
+          }
+        } catch (rssErr) {
+          await sendTelegramMessage(
+            chatId,
+            `⚠ Источник временно недоступен для <b>${row.url}</b>`
+          );
+          continue; // переходим к следующему сайту
         }
-      } else {
-        const response = await fetch(row.url);
-        const html = await response.text();
-        const $ = cheerio.load(html);
-        let elements = row.selector ? $(row.selector) : $(PRESET_SELECTORS[domain] || "body");
-        const content = elements.text().trim().slice(0, 500);
-        await sendTelegramMessage(chatId, `🔔 Сайт <b>${row.url}</b> сейчас содержит:\n<code>${content}</code>`);
+      }
+
+      if (!updated) {
+        try {
+          const response = await fetch(row.url);
+          if (!response.ok) {
+            await sendTelegramMessage(
+              chatId,
+              `⚠ Источник временно недоступен для <b>${row.url}</b>`
+            );
+            continue;
+          }
+
+          const html = await response.text();
+          const $ = cheerio.load(html);
+
+          let elements = row.selector
+            ? $(row.selector)
+            : $(PRESET_SELECTORS[domain] || "body");
+          const content = elements.text().trim().slice(0, 500);
+
+          if (content) {
+            await sendTelegramMessage(
+              chatId,
+              `🔔 Проверка <b>${row.url}</b> завершена.\nФрагмент:\n${content}`
+            );
+          } else {
+            await sendTelegramMessage(
+              chatId,
+              `ℹ️ Данных по <b>${row.url}</b> не найдено.`
+            );
+          }
+        } catch (httpErr) {
+          await sendTelegramMessage(
+            chatId,
+            `⚠ Ошибка при проверке <b>${row.url}</b>: ${httpErr.message}`
+          );
+        }
       }
     } catch (err) {
-      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
+      await sendTelegramMessage(
+        chatId,
+        `❌ Ошибка при обработке <b>${row.url}</b>: ${err.message}`
+      );
     }
   }
 }
+
 
 // 📩 Вебхук Telegram
 const waitingForURL = {}; // состояние "ожидаем URL"
