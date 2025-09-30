@@ -27,7 +27,7 @@ const PRESET_SELECTORS = {
   "tumblr.com": ".post"
 };
 
-// 🔗 Зеркала для проблемных сайтов (несколько вариантов)
+// 🔗 Зеркала для проблемных сайтов
 const RSS_MIRRORS = {
   "twitter.com": url => {
     const username = url.split("/").filter(Boolean).pop();
@@ -59,11 +59,22 @@ const RSS_MIRRORS = {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
   "tumblr.com": url => {
-    const base = url.split("/")[2]; // example.tumblr.com
-    return [
-      `https://${base}/rss`,
-      `https://rsshub.app/tumblr/blog/${base.replace(".tumblr.com", "")}`
-    ];
+    const parts = url.split("/");
+    const base = parts[2]; // example.tumblr.com или www.tumblr.com
+    if (base.includes("tumblr.com") && !base.startsWith("www.")) {
+      // username.tumblr.com
+      return [
+        `https://${base}/rss`,
+        `https://rsshub.app/tumblr/blog/${base.replace(".tumblr.com", "")}`
+      ];
+    } else {
+      // www.tumblr.com/blog/username
+      const blogName = parts[4];
+      return [
+        `https://www.tumblr.com/${blogName}/rss`,
+        `https://rsshub.app/tumblr/blog/${blogName}`
+      ];
+    }
   }
 };
 
@@ -92,7 +103,7 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений (с диагностикой и расширенным контентом)
+// 📌 Проверка обновлений (через RSS или fallback)
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
@@ -101,32 +112,36 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
 
+      let feed = null;
       if (RSS_MIRRORS[domain]) {
-        try {
-          const rssUrl = RSS_MIRRORS[domain](url);
-          const feed = await rssParser.parseURL(rssUrl);
-
-          if (feed.items && feed.items.length > 0) {
-            const latestItem = feed.items[0];
-            const contentToHash = (latestItem.link || "") + (latestItem.title || "");
-            const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
-
-            if (hash !== last_hash) {
-              await pool.query(
-                "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-                [hash, chat_id, url]
-              );
-
-              await sendTelegramMessage(
-                chat_id,
-                `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
-              );
-            }
+        const mirrors = RSS_MIRRORS[domain](url);
+        for (const mirror of mirrors) {
+          try {
+            feed = await rssParser.parseURL(mirror);
+            console.log(`✅ RSS зеркало сработало: ${mirror}`);
+            break;
+          } catch (err) {
+            console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
           }
-          continue;
-        } catch (rssErr) {
-          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
         }
+      }
+
+      if (feed && feed.items && feed.items.length > 0) {
+        const latestItem = feed.items[0];
+        const contentToHash = (latestItem.link || "") + (latestItem.title || "");
+        const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
+
+        if (hash !== last_hash) {
+          await pool.query(
+            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+            [hash, chat_id, url]
+          );
+          await sendTelegramMessage(
+            chat_id,
+            `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
+          );
+        }
+        continue;
       }
 
       // 🌐 Fallback: обычный fetch
@@ -144,21 +159,17 @@ async function checkUpdates() {
       const html = await response.text();
       const $ = cheerio.load(html);
 
-      // Выбираем контент
       let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
 
-      // Текст + ссылки (увеличена длина контента)
       const content = (
         elements.text().trim() +
         elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ")
-      ).slice(0, 5000); // теперь до 5000 символов
+      ).slice(0, 5000);
 
-      // Логирование для диагностики
       console.log(`👀 Проверка ${url}`);
       console.log("➡️ Используем селектор:", selector || PRESET_SELECTORS[domain] || "body");
       console.log("📄 Извлечённый контент:", content.slice(0, 300) + "...");
 
-      // Хеширование
       const hash = crypto.createHash("md5").update(content).digest("hex");
 
       if (hash !== last_hash) {
@@ -166,19 +177,14 @@ async function checkUpdates() {
           "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
           [hash, chat_id, url]
         );
-
         await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
       }
     } catch (err) {
       console.error(`❌ Ошибка проверки ${url}:`, err.message);
-      await sendTelegramMessage(
-        row.chat_id,
-        `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`
-      );
+      await sendTelegramMessage(chat_id, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
     }
   }
 }
-
 
 // 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
@@ -200,8 +206,8 @@ async function manualCheckUpdates(chatId) {
             feed = await rssParser.parseURL(mirror);
             console.log(`✅ Ручная проверка: зеркало сработало ${mirror}`);
             break;
-          } catch (rssErr) {
-            console.error(`⚠️ Ручная проверка: зеркало ${mirror} недоступно:`, rssErr.message);
+          } catch (err) {
+            console.error(`⚠️ Ручная проверка: зеркало ${mirror} не сработало: ${err.message}`);
           }
         }
 
@@ -305,7 +311,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
   console.log(`✅ Сервер запущен на порту ${PORT}`);
 
-  // 🔹 Добавляем тестовый сайт при первом запуске
   try {
     await pool.query(
       "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
@@ -316,9 +321,7 @@ app.listen(PORT, async () => {
     console.error("❌ Ошибка при добавлении тестового сайта:", err.message);
   }
 
-  // 🔹 Запускаем тестовую проверку сразу при старте
   console.log("⏳ Выполняю тестовую проверку...");
   await checkUpdates();
   console.log("✅ Тестовая проверка завершена!");
 });
-
