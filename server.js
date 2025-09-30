@@ -27,29 +27,45 @@ const PRESET_SELECTORS = {
   "tumblr.com": ".post"
 };
 
-// 🔗 Зеркала для проблемных сайтов (через RSS)
+// 🔗 Зеркала для проблемных сайтов (несколько вариантов)
 const RSS_MIRRORS = {
   "twitter.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://nitter.net/${username}/rss`;
+    return [
+      `https://nitter.net/${username}/rss`,
+      `https://nitter.lacontrevoie.fr/${username}/rss`,
+      `https://nitter.poast.org/${username}/rss`,
+      `https://nitter.fdn.fr/${username}/rss`
+    ];
   },
   "x.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://nitter.net/${username}/rss`;
+    return [
+      `https://nitter.net/${username}/rss`,
+      `https://nitter.lacontrevoie.fr/${username}/rss`,
+      `https://nitter.poast.org/${username}/rss`,
+      `https://nitter.fdn.fr/${username}/rss`
+    ];
   },
   "instagram.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://rsshub.app/instagram/user/${username}`;
+    return [
+      `https://rsshub.app/instagram/user/${username}`,
+      `https://ig-rss.com/rss/${username}`,
+      `https://insta-rss.vercel.app/${username}`
+    ];
   },
   "reddit.com": url => {
-    return url.endsWith("/") ? `${url}.rss` : `${url}/.rss`;
+    return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
   "tumblr.com": url => {
     const base = url.split("/")[2]; // example.tumblr.com
-    return `https://${base}/rss`;
+    return [
+      `https://${base}/rss`,
+      `https://rsshub.app/tumblr/blog/${base.replace(".tumblr.com", "")}`
+    ];
   }
 };
-
 
 // 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
@@ -76,7 +92,7 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений (с защитой от падения зеркал)
+// 📌 Проверка обновлений (с поддержкой зеркал)
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
@@ -86,32 +102,36 @@ async function checkUpdates() {
       const domain = new URL(url).hostname.replace("www.", "");
 
       if (RSS_MIRRORS[domain]) {
-        // 🔄 Попытка взять через RSS зеркало
-        try {
-          const rssUrl = RSS_MIRRORS[domain](url);
-          const feed = await rssParser.parseURL(rssUrl);
+        let feed = null;
+        const mirrors = RSS_MIRRORS[domain](url);
 
-          if (feed.items && feed.items.length > 0) {
-            const latestItem = feed.items[0];
-            const contentToHash = latestItem.link || latestItem.title;
-            const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
-
-            if (hash !== last_hash) {
-              await pool.query(
-                "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-                [hash, chat_id, url]
-              );
-
-              await sendTelegramMessage(
-                chat_id,
-                `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
-              );
-            }
+        for (const mirror of mirrors) {
+          try {
+            feed = await rssParser.parseURL(mirror);
+            console.log(`✅ Успешно сработало зеркало: ${mirror}`);
+            break;
+          } catch (rssErr) {
+            console.error(`⚠️ Зеркало ${mirror} недоступно:`, rssErr.message);
           }
-          continue; // ✅ Если зеркало сработало, идём к следующему URL
-        } catch (rssErr) {
-          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
-          // ⚠️ если зеркало не сработало — fallback на fetch
+        }
+
+        if (feed && feed.items && feed.items.length > 0) {
+          const latestItem = feed.items[0];
+          const contentToHash = (latestItem.title || "") + (latestItem.pubDate || "") + (latestItem.link || "");
+          const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
+
+          if (hash !== last_hash) {
+            await pool.query(
+              "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+              [hash, chat_id, url]
+            );
+
+            await sendTelegramMessage(
+              chat_id,
+              `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
+            );
+          }
+          continue;
         }
       }
 
@@ -152,8 +172,7 @@ async function checkUpdates() {
   }
 }
 
-
-// 🕒 Автопроверка каждые 15 минуты
+// 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
 
 // 📌 Ручная проверка
@@ -165,21 +184,25 @@ async function manualCheckUpdates(chatId) {
       let updated = false;
 
       if (RSS_MIRRORS[domain]) {
-        try {
-          const rssUrl = RSS_MIRRORS[domain](row.url);
-          const feed = await rssParser.parseURL(rssUrl);
+        let feed = null;
+        const mirrors = RSS_MIRRORS[domain](row.url);
 
-          if (feed.items && feed.items.length > 0) {
-            await sendTelegramMessage(
-              chatId,
-              `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
-            );
-            updated = true;
+        for (const mirror of mirrors) {
+          try {
+            feed = await rssParser.parseURL(mirror);
+            console.log(`✅ Ручная проверка: зеркало сработало ${mirror}`);
+            break;
+          } catch (rssErr) {
+            console.error(`⚠️ Ручная проверка: зеркало ${mirror} недоступно:`, rssErr.message);
           }
-        } catch (rssErr) {
-          console.error(`⚠️ Ошибка RSSHub ${row.url}:`, rssErr.message);
-          await sendTelegramMessage(chatId, `⚠ Источник временно недоступен: <b>${row.url}</b>`);
-          continue;
+        }
+
+        if (feed && feed.items && feed.items.length > 0) {
+          await sendTelegramMessage(
+            chatId,
+            `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
+          );
+          updated = true;
         }
       }
 
