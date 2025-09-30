@@ -27,15 +27,15 @@ const PRESET_SELECTORS = {
   "tumblr.com": ".post"
 };
 
-// RSS-зеркала через RSSHub
+// 🔗 Зеркала для проблемных сайтов (через RSS)
 const RSS_MIRRORS = {
   "twitter.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://rsshub.app/twitter/user/${username}`;
+    return `https://nitter.net/${username}/rss`;
   },
   "x.com": url => {
     const username = url.split("/").filter(Boolean).pop();
-    return `https://rsshub.app/twitter/user/${username}`;
+    return `https://nitter.net/${username}/rss`;
   },
   "instagram.com": url => {
     const username = url.split("/").filter(Boolean).pop();
@@ -43,8 +43,13 @@ const RSS_MIRRORS = {
   },
   "reddit.com": url => {
     return url.endsWith("/") ? `${url}.rss` : `${url}/.rss`;
+  },
+  "tumblr.com": url => {
+    const base = url.split("/")[2]; // example.tumblr.com
+    return `https://${base}/rss`;
   }
 };
+
 
 // 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
@@ -71,7 +76,7 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
   }
 }
 
-// 📌 Проверка обновлений
+// 📌 Проверка обновлений (с защитой от падения зеркал)
 async function checkUpdates() {
   const res = await pool.query("SELECT * FROM sites");
   for (const row of res.rows) {
@@ -81,6 +86,7 @@ async function checkUpdates() {
       const domain = new URL(url).hostname.replace("www.", "");
 
       if (RSS_MIRRORS[domain]) {
+        // 🔄 Попытка взять через RSS зеркало
         try {
           const rssUrl = RSS_MIRRORS[domain](url);
           const feed = await rssParser.parseURL(rssUrl);
@@ -102,43 +108,50 @@ async function checkUpdates() {
               );
             }
           }
+          continue; // ✅ Если зеркало сработало, идём к следующему URL
         } catch (rssErr) {
-          console.error(`⚠️ Ошибка RSSHub ${url}:`, rssErr.message);
-          await sendTelegramMessage(chat_id, `⚠ Источник временно недоступен: <b>${url}</b>`);
+          console.error(`⚠️ Зеркало для ${url} недоступно:`, rssErr.message);
+          // ⚠️ если зеркало не сработало — fallback на fetch
         }
-      } else {
-        // 🌐 Обычные сайты
-        const response = await fetch(url, {
-          headers: {
-            "User-Agent": "Mozilla/5.0",
-            "Accept-Language": "en-US,en;q=0.9"
-          }
-        });
+      }
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-        const html = await response.text();
-        const $ = cheerio.load(html);
-
-        let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
-        const content = elements.text().trim().slice(0, 500);
-        const hash = crypto.createHash("md5").update(content).digest("hex");
-
-        if (hash !== last_hash) {
-          await pool.query(
-            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-            [hash, chat_id, url]
-          );
-
-          await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
+      // 🌐 Fallback: обычный fetch
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "Accept-Language": "en-US,en;q=0.9"
         }
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const html = await response.text();
+      const $ = cheerio.load(html);
+
+      let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
+      const content = elements.text().trim().slice(0, 500);
+      const hash = crypto.createHash("md5").update(content).digest("hex");
+
+      if (hash !== last_hash) {
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+          [hash, chat_id, url]
+        );
+
+        await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
       }
     } catch (err) {
       console.error(`❌ Ошибка проверки ${url}:`, err.message);
-      await sendTelegramMessage(row.chat_id, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
+      await sendTelegramMessage(
+        row.chat_id,
+        `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`
+      );
     }
   }
 }
+
 
 // 🕒 Автопроверка каждые 15 минуты
 setInterval(checkUpdates, 900000);
