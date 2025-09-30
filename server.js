@@ -59,23 +59,31 @@ const RSS_MIRRORS = {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
   "tumblr.com": url => {
-    const parts = url.split("/");
-    const base = parts[2]; // example.tumblr.com или www.tumblr.com
-    if (base.includes("tumblr.com") && !base.startsWith("www.")) {
-      // username.tumblr.com
-      return [
-        `https://${base}/rss`,
-        `https://rsshub.app/tumblr/blog/${base.replace(".tumblr.com", "")}`
-      ];
-    } else {
-      // www.tumblr.com/blog/username
-      const blogName = parts[4];
-      return [
-        `https://www.tumblr.com/${blogName}/rss`,
-        `https://rsshub.app/tumblr/blog/${blogName}`
-      ];
-    }
+  const parts = url.split("/");
+  if (parts[2].includes(".tumblr.com")) {
+    // username.tumblr.com
+    const blogName = parts[2].split(".")[0];
+    return [
+      `https://${blogName}.tumblr.com/rss`,
+      `https://rsshub.app/tumblr/blog/${blogName}`
+    ];
+  } else if (parts[2] === "www.tumblr.com" && parts[3] === "blog") {
+    // www.tumblr.com/blog/username
+    const blogName = parts[4];
+    return [
+      `https://www.tumblr.com/${blogName}/rss`,
+      `https://rsshub.app/tumblr/blog/${blogName}`
+    ];
+  } else if (parts[2] === "www.tumblr.com" && parts[3]) {
+    // www.tumblr.com/username
+    const blogName = parts[3];
+    return [
+      `https://www.tumblr.com/${blogName}/rss`,
+      `https://rsshub.app/tumblr/blog/${blogName}`
+    ];
   }
+  return [];
+}
 };
 
 // 📩 Отправка сообщений
