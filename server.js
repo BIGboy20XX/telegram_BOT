@@ -1,338 +1,181 @@
 import express from "express";
+import bodyParser from "body-parser";
 import fetch from "node-fetch";
-import * as cheerio from "cheerio";
-import crypto from "crypto";
-import { Pool } from "pg";
-import Parser from "rss-parser";
+import cheerio from "cheerio";
+import TelegramBot from "node-telegram-bot-api";
+
+// === Настройки ===
+const TOKEN = process.env.TELEGRAM_TOKEN;
+const URL = `https://api.telegram.org/bot${TOKEN}`;
+const PORT = process.env.PORT || 3000;
 
 const app = express();
-app.use(express.json({ limit: "2mb" }));
+app.use(bodyParser.json());
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
-});
+// === Telegram Bot ===
+const bot = new TelegramBot(TOKEN);
+bot.setWebHook(`${process.env.RENDER_EXTERNAL_URL}/webhook/${TOKEN}`);
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-if (!TELEGRAM_TOKEN) {
-  console.error("❌ Ошибка: TELEGRAM_TOKEN не задан!");
-  process.exit(1);
-}
-const TELEGRAM_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-const rssParser = new Parser();
-
-// Предустановленные селекторы
-const PRESET_SELECTORS = {
-  "reddit.com": ".Post",
-  "tumblr.com": ".post"
-};
-
-// 🔗 Зеркала для проблемных сайтов
-const RSS_MIRRORS = {
-  "twitter.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
-    return [
-      `https://nitter.net/${username}/rss`,
-      `https://nitter.lacontrevoie.fr/${username}/rss`,
-      `https://nitter.poast.org/${username}/rss`,
-      `https://nitter.fdn.fr/${username}/rss`
-    ];
-  },
-  "x.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
-    return [
-      `https://nitter.net/${username}/rss`,
-      `https://nitter.lacontrevoie.fr/${username}/rss`,
-      `https://nitter.poast.org/${username}/rss`,
-      `https://nitter.fdn.fr/${username}/rss`
-    ];
-  },
-  "instagram.com": url => {
-    const username = url.split("/").filter(Boolean).pop();
-    return [
-      `https://rsshub.app/instagram/user/${username}`,
-      `https://ig-rss.com/rss/${username}`,
-      `https://insta-rss.vercel.app/${username}`
-    ];
-  },
-  "reddit.com": url => {
-    return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
-  },
-  "tumblr.com": url => {
-    try {
-      const u = new URL(url);
-      const parts = u.hostname.split(".");
-      let blogName = null;
-
-      if (parts.length === 3 && parts[1] === "tumblr" && parts[2] === "com") {
-        // username.tumblr.com
-        blogName = parts[0];
-      } else if (u.hostname === "www.tumblr.com") {
-        // www.tumblr.com/blog/username или www.tumblr.com/username
-        const pathParts = u.pathname.split("/").filter(Boolean);
-        if (pathParts[0] === "blog" && pathParts[1]) {
-          blogName = pathParts[1];
-        } else if (pathParts[0]) {
-          blogName = pathParts[0];
-        }
-      }
-
-      if (!blogName) return [];
-
-      return [
-        `https://${blogName}.tumblr.com/rss`,
-        `https://rsshub.app/tumblr/blog/${blogName}`
-      ];
-    } catch {
-      return [];
-    }
-  }
-};
-
-// 📩 Отправка сообщений
-async function sendTelegramMessage(chatId, text, keyboard = null) {
-  try {
-    const body = {
-      chat_id: chatId,
-      text,
-      parse_mode: "HTML"
-    };
-    if (keyboard) {
-      body.reply_markup = keyboard;
-    }
-    const res = await fetch(`${TELEGRAM_API}/sendMessage`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      console.error("❌ Ошибка при отправке:", data);
-    }
-  } catch (err) {
-    console.error("❌ Ошибка fetch:", err.message);
-  }
-}
-
-// 📌 Проверка обновлений (через RSS или fallback)
-async function checkUpdates() {
-  const res = await pool.query("SELECT * FROM sites");
-  for (const row of res.rows) {
-    const { chat_id, url, selector, last_hash } = row;
-
-    try {
-      const domain = new URL(url).hostname.replace("www.", "");
-
-      let feed = null;
-      if (RSS_MIRRORS[domain]) {
-        const mirrors = RSS_MIRRORS[domain](url);
-        for (const mirror of mirrors) {
-          try {
-            feed = await rssParser.parseURL(mirror);
-            console.log(`✅ RSS зеркало сработало: ${mirror}`);
-            break;
-          } catch (err) {
-            console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
-          }
-        }
-      }
-
-      if (feed && feed.items && feed.items.length > 0) {
-        const latestItem = feed.items[0];
-        const contentToHash = (latestItem.link || "") + (latestItem.title || "");
-        const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
-
-        if (hash !== last_hash) {
-          await pool.query(
-            "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-            [hash, chat_id, url]
-          );
-          await sendTelegramMessage(
-            chat_id,
-            `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
-          );
-        }
-        continue;
-      }
-
-      // 🌐 Fallback: обычный fetch
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-          "Accept-Language": "en-US,en;q=0.9"
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const html = await response.text();
-      const $ = cheerio.load(html);
-
-      let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
-
-      const content = (
-        elements.text().trim() +
-        elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ")
-      ).slice(0, 5000);
-
-      console.log(`👀 Проверка ${url}`);
-      console.log("➡️ Используем селектор:", selector || PRESET_SELECTORS[domain] || "body");
-      console.log("📄 Извлечённый контент:", content.slice(0, 300) + "...");
-
-      const hash = crypto.createHash("md5").update(content).digest("hex");
-
-      if (hash !== last_hash) {
-        await pool.query(
-          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
-          [hash, chat_id, url]
-        );
-        await sendTelegramMessage(chat_id, `🔔 Обновление на <b>${url}</b>`);
-      }
-    } catch (err) {
-      console.error(`❌ Ошибка проверки ${url}:`, err.message);
-      await sendTelegramMessage(chat_id, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
-    }
-  }
-}
-
-// 🕒 Автопроверка каждые 15 минут
-setInterval(checkUpdates, 900000);
-
-// 📌 Ручная проверка
-async function manualCheckUpdates(chatId) {
-  const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
-  for (const row of res.rows) {
-    try {
-      const domain = new URL(row.url).hostname.replace("www.", "");
-      let updated = false;
-
-      if (RSS_MIRRORS[domain]) {
-        let feed = null;
-        const mirrors = RSS_MIRRORS[domain](row.url);
-
-        for (const mirror of mirrors) {
-          try {
-            feed = await rssParser.parseURL(mirror);
-            console.log(`✅ Ручная проверка: зеркало сработало ${mirror}`);
-            break;
-          } catch (err) {
-            console.error(`⚠️ Ручная проверка: зеркало ${mirror} не сработало: ${err.message}`);
-          }
-        }
-
-        if (feed && feed.items && feed.items.length > 0) {
-          await sendTelegramMessage(
-            chatId,
-            `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
-          );
-          updated = true;
-        }
-      }
-
-      if (!updated) {
-        await sendTelegramMessage(chatId, `ℹ️ Данных по <b>${row.url}</b> не найдено.`);
-      }
-    } catch (err) {
-      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
-    }
-  }
-}
-
-// 📩 Вебхук Telegram
-const waitingForURL = {};
-
-app.post(`/webhook/${TELEGRAM_TOKEN}`, async (req, res) => {
-  if (req.body.message && req.body.message.text) {
-    const message = req.body.message;
-    const chatId = message.chat.id;
-    const text = message.text.trim();
-
-    const mainKeyboard = {
-      keyboard: [
-        ["➕ Добавить сайт", "📋 Мои сайты"],
-        ["❌ Удалить сайт", "🔄 Проверить обновления"],
-        ["ℹ️ Помощь"]
-      ],
-      resize_keyboard: true
-    };
-
-    if (waitingForURL[chatId]) {
-      try {
-        const url = text;
-        let selector = PRESET_SELECTORS[new URL(url).hostname.replace("www.", "")] || null;
-        await pool.query(
-          "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
-          [chatId, url, selector]
-        );
-        await sendTelegramMessage(chatId, `✅ Буду следить за: <b>${url}</b>`, mainKeyboard);
-      } catch {
-        await sendTelegramMessage(chatId, "❌ Ошибка: некорректный URL", mainKeyboard);
-      }
-      delete waitingForURL[chatId];
-      return res.sendStatus(200);
-    }
-
-    if (text === "/start") {
-      await sendTelegramMessage(chatId, "👋 Привет! Я бот для мониторинга обновлений.\nВыбери действие:", mainKeyboard);
-    } else if (text === "📋 Мои сайты") {
-      const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
-      if (result.rows.length === 0) {
-        await sendTelegramMessage(chatId, "📭 У вас пока нет сайтов.", mainKeyboard);
-      } else {
-        const list = result.rows.map((r, i) => `${i + 1}. <code>${r.url}</code>`).join("\n");
-        await sendTelegramMessage(chatId, `📋 Ваши сайты:\n${list}\n\nДля удаления введите номер сайта после выбора «❌ Удалить сайт».`, mainKeyboard);
-      }
-    } else if (text === "❌ Удалить сайт") {
-      await sendTelegramMessage(chatId, "Введите номер сайта, который хотите удалить.", mainKeyboard);
-    } else if (/^\d+$/.test(text)) {
-      const index = parseInt(text);
-      const result = await pool.query("SELECT url FROM sites WHERE chat_id=$1", [chatId]);
-      if (index > 0 && index <= result.rows.length) {
-        const urlToDelete = result.rows[index - 1].url;
-        await pool.query("DELETE FROM sites WHERE chat_id=$1 AND url=$2", [chatId, urlToDelete]);
-        await sendTelegramMessage(chatId, `❌ Сайт <code>${urlToDelete}</code> удалён.`, mainKeyboard);
-      } else {
-        await sendTelegramMessage(chatId, "❌ Неверный номер сайта.", mainKeyboard);
-      }
-    } else if (text === "🔄 Проверить обновления") {
-      await sendTelegramMessage(chatId, "⏳ Проверяю сайты...", mainKeyboard);
-      await manualCheckUpdates(chatId);
-      await sendTelegramMessage(chatId, "✅ Проверка завершена!", mainKeyboard);
-    } else if (text === "ℹ️ Помощь") {
-      await sendTelegramMessage(chatId,
-        "ℹ️ Справка по командам:\n\n" +
-        "• <b>/start</b> — открыть меню\n" +
-        "• <b>➕ Добавить сайт</b> — добавить сайт для мониторинга\n" +
-        "• <b>📋 Мои сайты</b> — список ваших сайтов\n" +
-        "• <b>❌ Удалить сайт</b> — удалить сайт по номеру\n" +
-        "• <b>🔄 Проверить обновления</b> — ручная проверка сайтов\n" +
-        "• <b>ℹ️ Помощь</b> — показать это сообщение", mainKeyboard);
-    } else if (text === "➕ Добавить сайт") {
-      waitingForURL[chatId] = true;
-      await sendTelegramMessage(chatId, "Введите URL сайта для мониторинга:", mainKeyboard);
-    }
-  }
+app.post(`/webhook/${TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-// 🚀 Запуск сервера
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, async () => {
-  console.log(`✅ Сервер запущен на порту ${PORT}`);
+// === БД (в памяти) ===
+let userSites = {}; // { chatId: [ { url, lastHash } ] }
 
+// === Хэширование контента ===
+import crypto from "crypto";
+function getHash(content) {
+  return crypto.createHash("sha256").update(content).digest("hex");
+}
+
+// === Зеркала для сайтов ===
+const RSS_MIRRORS = {
+  "tumblr.com": url => {
+    const u = new URL(url);
+    let blogName = null;
+
+    // Вариант 1: username.tumblr.com
+    if (u.hostname.endsWith(".tumblr.com")) {
+      blogName = u.hostname.split(".")[0];
+    }
+    // Вариант 2: www.tumblr.com/blog/username
+    else if (u.hostname === "www.tumblr.com" && u.pathname.startsWith("/blog/")) {
+      blogName = u.pathname.split("/")[2];
+    }
+    // Вариант 3: www.tumblr.com/username
+    else if (u.hostname === "www.tumblr.com" && u.pathname.split("/")[1]) {
+      blogName = u.pathname.split("/")[1];
+    }
+
+    if (!blogName) return [];
+
+    return [
+      `https://${blogName}.tumblr.com/rss`,
+      `https://rsshub.app/tumblr/blog/${blogName}`
+    ];
+  }
+};
+
+// === Проверка сайта ===
+async function checkSite(url) {
   try {
-    await pool.query(
-      "INSERT INTO sites (chat_id, url, selector, last_hash, last_update) VALUES ($1,$2,$3,'',NOW()) ON CONFLICT DO NOTHING",
-      [0, "https://example.com", "body"]
-    );
-    console.log("🔧 Тестовый сайт https://example.com добавлен в базу (chat_id=0).");
+    console.log(`👀 Проверка ${url}`);
+
+    // Если есть RSS-зеркала
+    for (const domain in RSS_MIRRORS) {
+      if (url.includes(domain)) {
+        const mirrors = RSS_MIRRORS[domain](url);
+        for (const m of mirrors) {
+          try {
+            const r = await fetch(m, { timeout: 10000 });
+            if (r.ok) {
+              const text = await r.text();
+              return getHash(text.slice(0, 10000));
+            } else {
+              console.log(`⚠️ Зеркало ${m} не сработало: Status code ${r.status}`);
+            }
+          } catch (e) {
+            console.log(`⚠️ Ошибка при зеркале ${m}: ${e.message}`);
+          }
+        }
+      }
+    }
+
+    // Если RSS не сработал — парсим HTML
+    const res = await fetch(url, { timeout: 10000 });
+    if (!res.ok) {
+      console.log(`⚠️ Прямая проверка ${url}: Status ${res.status}`);
+      return null;
+    }
+
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    const content = $("body").text().slice(0, 10000);
+    return getHash(content);
   } catch (err) {
-    console.error("❌ Ошибка при добавлении тестового сайта:", err.message);
+    console.log(`❌ Ошибка при проверке ${url}: ${err.message}`);
+    return null;
+  }
+}
+
+// === Автопроверка ===
+async function checkUpdates() {
+  for (const chatId in userSites) {
+    for (const site of userSites[chatId]) {
+      const newHash = await checkSite(site.url);
+      if (newHash && site.lastHash && newHash !== site.lastHash) {
+        bot.sendMessage(chatId, `♻️ Обновления на сайте: ${site.url}`);
+      }
+      if (newHash) site.lastHash = newHash;
+    }
+  }
+}
+setInterval(checkUpdates, 120000);
+
+// === Команды ===
+bot.onText(/\/start/, msg => {
+  const chatId = msg.chat.id;
+  userSites[chatId] = [];
+  bot.sendMessage(
+    chatId,
+    "Привет! Я бот для мониторинга сайтов.\n\nКоманды:\n" +
+      "/add <url> — добавить сайт\n" +
+      "/list — список сайтов\n" +
+      "/remove <url> — удалить сайт\n" +
+      "/check — проверить сайты вручную"
+  );
+});
+
+bot.onText(/\/add (.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const url = match[1];
+  if (!userSites[chatId]) userSites[chatId] = [];
+  const hash = await checkSite(url);
+  userSites[chatId].push({ url, lastHash: hash });
+  bot.sendMessage(chatId, `✅ Сайт добавлен: ${url}`);
+});
+
+bot.onText(/\/list/, msg => {
+  const chatId = msg.chat.id;
+  const sites = userSites[chatId] || [];
+  if (sites.length === 0) {
+    bot.sendMessage(chatId, "❌ У тебя нет добавленных сайтов.");
+  } else {
+    const list = sites.map((s, i) => `${i + 1}. ${s.url}`).join("\n");
+    bot.sendMessage(chatId, `📄 Твои сайты:\n${list}`);
+  }
+});
+
+bot.onText(/\/remove (.+)/, (msg, match) => {
+  const chatId = msg.chat.id;
+  const url = match[1];
+  userSites[chatId] = (userSites[chatId] || []).filter(s => s.url !== url);
+  bot.sendMessage(chatId, `🗑️ Удалён сайт: ${url}`);
+});
+
+bot.onText(/\/check/, async msg => {
+  const chatId = msg.chat.id;
+  const sites = userSites[chatId] || [];
+  if (sites.length === 0) {
+    bot.sendMessage(chatId, "❌ Нет сайтов для проверки.");
+    return;
   }
 
-  console.log("⏳ Выполняю тестовую проверку...");
-  await checkUpdates();
-  console.log("✅ Тестовая проверка завершена!");
+  for (const site of sites) {
+    const newHash = await checkSite(site.url);
+    if (newHash && site.lastHash && newHash !== site.lastHash) {
+      bot.sendMessage(chatId, `♻️ Обновления на сайте: ${site.url}`);
+    } else {
+      bot.sendMessage(chatId, `✅ Нет изменений: ${site.url}`);
+    }
+    if (newHash) site.lastHash = newHash;
+  }
 });
+
+// === Запуск сервера ===
+app.listen(PORT, () => {
+  console.log(`🚀 Сервер запущен на порту ${PORT}`);
+});
+
