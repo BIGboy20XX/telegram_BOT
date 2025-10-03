@@ -1,7 +1,7 @@
 import express from "express";
 import bodyParser from "body-parser";
 import fetch from "node-fetch";
-import cheerio from "cheerio";
+import * as cheerio from "cheerio";
 import TelegramBot from "node-telegram-bot-api";
 
 // === Настройки ===
