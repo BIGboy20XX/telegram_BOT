@@ -118,6 +118,16 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
     console.error("❌ Ошибка fetch:", err.message);
   }
 }
+// 🕒 безопасный fetch с таймаутом
+async function fetchWithTimeout(url, options = {}, timeout = 15000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(id);
+  }
+}
 
 // 📌 Проверка обновлений (через RSS или fallback)
 async function checkUpdates() {
@@ -160,8 +170,8 @@ async function checkUpdates() {
         continue;
       }
 
-      // 🌐 Fallback: обычный fetch
-      const response = await fetch(url, {
+      // 🌐 Fallback: обычный fetch с таймаутом
+      const response = await fetchWithTimeout(url, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
           "Accept-Language": "en-US,en;q=0.9"
@@ -205,7 +215,7 @@ async function checkUpdates() {
 // 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
 
-// 📌 Ручная проверка
+// 📌 Ручная проверка (переписанная)
 async function manualCheckUpdates(chatId) {
   const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
   for (const row of res.rows) {
