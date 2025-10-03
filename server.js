@@ -118,27 +118,36 @@ async function sendTelegramMessage(chatId, text, keyboard = null) {
     console.error("❌ Ошибка fetch:", err.message);
   }
 }
-// 🕒 безопасный fetch с таймаутом
-async function fetchWithTimeout(url, options = {}, timeout = 15000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeout);
-  try {
-    return await fetch(url, { ...options, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
+
+
+// 📌 Рандомный User-Agent
+function getRandomUserAgent() {
+  const agents = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1",
+    "Mozilla/5.0 (iPad; CPU OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile Safari/604.1"
+  ];
+  return agents[Math.floor(Math.random() * agents.length)];
+}
+
+// 📌 Задержка
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // 📌 Проверка обновлений (через RSS или fallback)
 async function checkUpdates() {
-  const res = await pool.query("SELECT * FROM sites");
+  const res = await pool.query("SELECT * FROM sites WHERE chat_id != 0");
   for (const row of res.rows) {
     const { chat_id, url, selector, last_hash } = row;
 
     try {
       const domain = new URL(url).hostname.replace("www.", "");
-
       let feed = null;
+
+      // 📰 Пробуем RSS зеркала
       if (RSS_MIRRORS[domain]) {
         const mirrors = RSS_MIRRORS[domain](url);
         for (const mirror of mirrors) {
@@ -148,10 +157,16 @@ async function checkUpdates() {
             break;
           } catch (err) {
             console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
+            if (err.message.includes("429")) {
+              console.log("⚠️ Слишком много запросов → перехожу на HTML fallback.");
+              feed = null;
+              break;
+            }
           }
         }
       }
 
+      // 📰 Если удалось получить RSS
       if (feed && feed.items && feed.items.length > 0) {
         const latestItem = feed.items[0];
         const contentToHash = (latestItem.link || "") + (latestItem.title || "");
@@ -167,13 +182,14 @@ async function checkUpdates() {
             `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
           );
         }
+        await sleep(500 + Math.random() * 1000);
         continue;
       }
 
-      // 🌐 Fallback: обычный fetch с таймаутом
-      const response = await fetchWithTimeout(url, {
+      // 🌐 Fallback: HTML-парсинг
+      const response = await fetch(url, {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+          "User-Agent": getRandomUserAgent(),
           "Accept-Language": "en-US,en;q=0.9"
         }
       });
@@ -209,8 +225,89 @@ async function checkUpdates() {
       console.error(`❌ Ошибка проверки ${url}:`, err.message);
       await sendTelegramMessage(chat_id, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
     }
+
+    await sleep(500 + Math.random() * 1000);
   }
 }
+
+
+// 📌 Ручная проверка (теперь как checkUpdates)
+async function manualCheckUpdates(chatId) {
+  const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
+  for (const row of res.rows) {
+    const { url, selector, last_hash } = row;
+
+    try {
+      const domain = new URL(url).hostname.replace("www.", "");
+      let feed = null;
+
+      if (RSS_MIRRORS[domain]) {
+        const mirrors = RSS_MIRRORS[domain](url);
+        for (const mirror of mirrors) {
+          try {
+            feed = await rssParser.parseURL(mirror);
+            console.log(`✅ Ручная проверка: зеркало сработало ${mirror}`);
+            break;
+          } catch (err) {
+            console.error(`⚠️ Ручная проверка: зеркало ${mirror} не сработало: ${err.message}`);
+            if (err.message.includes("429")) {
+              console.log("⚠️ Ручная проверка: слишком много запросов → HTML fallback.");
+              feed = null;
+              break;
+            }
+          }
+        }
+      }
+
+      if (feed && feed.items && feed.items.length > 0) {
+        await sendTelegramMessage(
+          chatId,
+          `🔔 Последний пост с <b>${url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
+        );
+        await sleep(500 + Math.random() * 1000);
+        continue;
+      }
+
+      // 🌐 Fallback
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": getRandomUserAgent(),
+          "Accept-Language": "en-US,en;q=0.9"
+        }
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const html = await response.text();
+      const $ = cheerio.load(html);
+
+      let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
+
+      const content = (
+        elements.text().trim() +
+        elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ")
+      ).slice(0, 5000);
+
+      const hash = crypto.createHash("md5").update(content).digest("hex");
+
+      if (hash !== last_hash) {
+        await pool.query(
+          "UPDATE sites SET last_hash=$1, last_update=NOW() WHERE chat_id=$2 AND url=$3",
+          [hash, chatId, url]
+        );
+        await sendTelegramMessage(chatId, `🔔 Обновление на <b>${url}</b>`);
+      } else {
+        await sendTelegramMessage(chatId, `ℹ️ Новых обновлений на <b>${url}</b> нет.`);
+      }
+    } catch (err) {
+      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
+    }
+
+    await sleep(500 + Math.random() * 1000);
+  }
+}
+
+
 
 // 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
