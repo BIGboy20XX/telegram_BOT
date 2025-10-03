@@ -312,46 +312,6 @@ async function manualCheckUpdates(chatId) {
 // 🕒 Автопроверка каждые 15 минут
 setInterval(checkUpdates, 900000);
 
-// 📌 Ручная проверка (переписанная)
-async function manualCheckUpdates(chatId) {
-  const res = await pool.query("SELECT * FROM sites WHERE chat_id=$1", [chatId]);
-  for (const row of res.rows) {
-    try {
-      const domain = new URL(row.url).hostname.replace("www.", "");
-      let updated = false;
-
-      if (RSS_MIRRORS[domain]) {
-        let feed = null;
-        const mirrors = RSS_MIRRORS[domain](row.url);
-
-        for (const mirror of mirrors) {
-          try {
-            feed = await rssParser.parseURL(mirror);
-            console.log(`✅ Ручная проверка: зеркало сработало ${mirror}`);
-            break;
-          } catch (err) {
-            console.error(`⚠️ Ручная проверка: зеркало ${mirror} не сработало: ${err.message}`);
-          }
-        }
-
-        if (feed && feed.items && feed.items.length > 0) {
-          await sendTelegramMessage(
-            chatId,
-            `🔔 Последний пост с <b>${row.url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
-          );
-          updated = true;
-        }
-      }
-
-      if (!updated) {
-        await sendTelegramMessage(chatId, `ℹ️ Данных по <b>${row.url}</b> не найдено.`);
-      }
-    } catch (err) {
-      await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${row.url}</b>: ${err.message}`);
-    }
-  }
-}
-
 // 📩 Вебхук Telegram
 const waitingForURL = {};
 
