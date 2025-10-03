@@ -64,28 +64,34 @@ const RSS_MIRRORS = {
     let blogName = null;
 
     if (u.hostname.endsWith(".tumblr.com")) {
-      // username.tumblr.com
+      // Вариант: username.tumblr.com
       blogName = u.hostname.split(".")[0];
     } else if (u.hostname === "www.tumblr.com") {
-      // www.tumblr.com/blog/username или www.tumblr.com/username
+      // Вариант: www.tumblr.com/blog/username
+      // или: www.tumblr.com/username
       const pathParts = u.pathname.split("/").filter(Boolean);
-      if (pathParts[0] === "blog" && pathParts[1]) {
-        blogName = pathParts[1];
-      } else if (pathParts[0]) {
-        blogName = pathParts[0];
+      if (pathParts.length >= 2 && pathParts[0] === "blog") {
+        blogName = pathParts[1]; // /blog/username
+      } else if (pathParts.length >= 1) {
+        blogName = pathParts[0]; // /username
       }
     }
 
-    if (!blogName) return [];
+    if (!blogName) {
+      console.error("⚠️ Не удалось определить блог для URL:", url);
+      return [];
+    }
 
     return [
       `https://${blogName}.tumblr.com/rss`,
       `https://rsshub.app/tumblr/blog/${blogName}`
     ];
-  } catch {
+  } catch (err) {
+    console.error("⚠️ Ошибка Tumblr-парсера:", err.message);
     return [];
   }
 }
+
 
 };
 
