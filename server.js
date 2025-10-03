@@ -59,41 +59,40 @@ const RSS_MIRRORS = {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
   "tumblr.com": url => {
-  try {
-    const u = new URL(url);
-    let blogName = null;
+    try {
+      const u = new URL(url);
+      let blogName = null;
 
-    if (u.hostname.endsWith(".tumblr.com")) {
-      // Вариант: username.tumblr.com
-      blogName = u.hostname.split(".")[0];
-    } else if (u.hostname === "www.tumblr.com") {
-      // Вариант: www.tumblr.com/blog/username
-      // или: www.tumblr.com/username
-      const pathParts = u.pathname.split("/").filter(Boolean);
-      if (pathParts.length >= 2 && pathParts[0] === "blog") {
-        blogName = pathParts[1]; // /blog/username
-      } else if (pathParts.length >= 1) {
-        blogName = pathParts[0]; // /username
+      if (u.hostname.endsWith(".tumblr.com")) {
+        // Вариант: username.tumblr.com
+        blogName = u.hostname.split(".")[0];
+      } else if (u.hostname === "www.tumblr.com") {
+        // Варианты: www.tumblr.com/blog/username или www.tumblr.com/username
+        const pathParts = u.pathname.split("/").filter(Boolean);
+
+        if (pathParts[0] === "blog" && pathParts[1]) {
+          blogName = pathParts[1]; // /blog/username
+        } else if (pathParts[0]) {
+          blogName = pathParts[0]; // /username
+        }
       }
-    }
 
-    if (!blogName) {
-      console.error("⚠️ Не удалось определить блог для URL:", url);
+      if (!blogName) {
+        console.error("⚠️ Не удалось определить Tumblr-блог для URL:", url);
+        return [];
+      }
+
+      return [
+        `https://${blogName}.tumblr.com/rss`,
+        `https://rsshub.app/tumblr/blog/${blogName}`
+      ];
+    } catch (err) {
+      console.error("⚠️ Ошибка Tumblr-парсера:", err.message);
       return [];
     }
-
-    return [
-      `https://${blogName}.tumblr.com/rss`,
-      `https://rsshub.app/tumblr/blog/${blogName}`
-    ];
-  } catch (err) {
-    console.error("⚠️ Ошибка Tumblr-парсера:", err.message);
-    return [];
   }
-}
-
-
 };
+
 
 // 📩 Отправка сообщений
 async function sendTelegramMessage(chatId, text, keyboard = null) {
