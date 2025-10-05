@@ -58,13 +58,12 @@ const RSS_MIRRORS = {
   "reddit.com": url => {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
-  "tumblr.com": url => {
+ "tumblr.com": url => {
   try {
     const u = new URL(url);
     let blogName = null;
 
     if (u.hostname.endsWith(".tumblr.com")) {
-      // Пример: unseenwarriorsellsword.tumblr.com
       blogName = u.hostname.split(".")[0];
     } else if (u.hostname === "www.tumblr.com") {
       // Примеры:
@@ -75,7 +74,7 @@ const RSS_MIRRORS = {
     }
 
 
-      if (!blogName) {
+      if (!blogName || blogName === "www" || blogName === "undefined") {
       console.error("⚠️ Не удалось определить Tumblr-блог для URL:", url);
       return [];
     }
@@ -144,6 +143,12 @@ async function checkUpdates() {
     try {
       const domain = new URL(url).hostname.replace("www.", "");
       let feed = null;
+let mirrors = [];
+if (domain.includes("tumblr.com")) {
+  mirrors = RSS_MIRRORS["tumblr.com"](url);
+} else if (RSS_MIRRORS[domain]) {
+  mirrors = RSS_MIRRORS[domain](url);
+}
 
       // 📰 Пробуем RSS зеркала
       if (RSS_MIRRORS[domain]) {
