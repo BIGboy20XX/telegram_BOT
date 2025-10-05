@@ -64,22 +64,28 @@ const RSS_MIRRORS = {
     let blogName = null;
 
     if (u.hostname.endsWith(".tumblr.com")) {
+      // Пример: unseenwarriorsellsword.tumblr.com
       blogName = u.hostname.split(".")[0];
-    } else if (u.hostname === "www.tumblr.com") {
+    } else if (u.hostname === "www.tumblr.com" || u.hostname === "tumblr.com") {
       // Примеры:
       // https://www.tumblr.com/blog/unseenwarriorsellsword
       // https://www.tumblr.com/unseenwarriorsellsword
       const parts = u.pathname.split("/").filter(Boolean);
-      blogName = parts.includes("blog") ? parts[parts.indexOf("blog") + 1] : parts[0];
+      // Если URL вида /blog/username
+      if (parts.length >= 2 && parts[0] === "blog") {
+        blogName = parts[1];
+      } else if (parts.length >= 1) {
+        blogName = parts[0];
+      }
     }
 
-
-      if (!blogName || blogName === "www" || blogName === "undefined") {
+    if (!blogName || blogName === "www" || blogName === "undefined") {
       console.error("⚠️ Не удалось определить Tumblr-блог для URL:", url);
       return [];
     }
 
-      return [
+    console.log(`✅ Tumblr blog определён: ${blogName}`);
+    return [
       `https://${blogName}.tumblr.com/rss`,
       `https://rsshub.app/tumblr/blog/${blogName}`
     ];
