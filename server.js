@@ -157,10 +157,9 @@ async function checkUpdates() {
             break;
           } catch (err) {
             console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
-            if (err.message.includes("429")) {
-              console.log("⚠️ Слишком много запросов → перехожу на HTML fallback.");
-              feed = null;
-              break;
+            // если 429 или 503 → пробуем следующее зеркало
+            if (err.message.includes("429") || err.message.includes("503")) {
+              continue;
             }
           }
         }
@@ -182,7 +181,7 @@ async function checkUpdates() {
             `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
           );
         }
-        await sleep(500 + Math.random() * 1000);
+        await sleep(1000 + Math.random() * 1500);
         continue;
       }
 
@@ -194,9 +193,7 @@ async function checkUpdates() {
         }
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const html = await response.text();
       const $ = cheerio.load(html);
@@ -226,7 +223,7 @@ async function checkUpdates() {
       await sendTelegramMessage(chat_id, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
     }
 
-    await sleep(500 + Math.random() * 1000);
+    await sleep(1000 + Math.random() * 2000);
   }
 }
 
@@ -250,10 +247,8 @@ async function manualCheckUpdates(chatId) {
             break;
           } catch (err) {
             console.error(`⚠️ Ручная проверка: зеркало ${mirror} не сработало: ${err.message}`);
-            if (err.message.includes("429")) {
-              console.log("⚠️ Ручная проверка: слишком много запросов → HTML fallback.");
-              feed = null;
-              break;
+            if (err.message.includes("429") || err.message.includes("503")) {
+              continue;
             }
           }
         }
@@ -264,7 +259,7 @@ async function manualCheckUpdates(chatId) {
           chatId,
           `🔔 Последний пост с <b>${url}</b>:\n${feed.items[0].title}\n<code>${feed.items[0].link}</code>`
         );
-        await sleep(500 + Math.random() * 1000);
+        await sleep(1000 + Math.random() * 1500);
         continue;
       }
 
@@ -303,7 +298,7 @@ async function manualCheckUpdates(chatId) {
       await sendTelegramMessage(chatId, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
     }
 
-    await sleep(500 + Math.random() * 1000);
+    await sleep(1000 + Math.random() * 2000);
   }
 }
 
