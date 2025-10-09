@@ -146,43 +146,45 @@ function sleep(ms) {
 
 // 📌 Проверка обновлений (через RSS или fallback)
 async function checkUpdates() {
-  await sleep(3000 + Math.random() * 2000); // 3–5 секунд между запросами
+  await sleep(3000 + Math.random() * 2000);
   const res = await pool.query("SELECT * FROM sites WHERE chat_id != 0");
+
   for (const row of res.rows) {
     const { chat_id, url, selector, last_hash } = row;
 
     try {
-      const domain = new URL(url).hostname.replace("www.", "");
+      const hostname = new URL(url).hostname.replace("www.", "");
       let feed = null;
-let mirrors = [];
-if (domain.includes("tumblr.com")) {
-  mirrors = RSS_MIRRORS["tumblr.com"](url);
-} else if (RSS_MIRRORS[domain]) {
-  mirrors = RSS_MIRRORS[domain](url);
-}
+      let mirrors = [];
+
+      // 💡 Всегда вызываем Tumblr-парсер вручную
+      if (url.includes("tumblr.com")) {
+        mirrors = RSS_MIRRORS["tumblr.com"](url);
+      } else if (RSS_MIRRORS[hostname]) {
+        mirrors = RSS_MIRRORS[hostname](url);
+      }
 
       // 📰 Пробуем RSS зеркала
-      if (RSS_MIRRORS[domain]) {
-        const mirrors = RSS_MIRRORS[domain](url);
-        for (const mirror of mirrors) {
-          try {
-            feed = await rssParser.parseURL(mirror);
-            console.log(`✅ RSS зеркало сработало: ${mirror}`);
-            break;
-          } catch (err) {
-            console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
-            // если 429 или 503 → пробуем следующее зеркало
-            if (err.message.includes("429") || err.message.includes("503")) {
-              continue;
-            }
+      for (const mirror of mirrors) {
+        try {
+          feed = await rssParser.parseURL(mirror);
+          console.log(`✅ RSS зеркало сработало: ${mirror}`);
+          break;
+        } catch (err) {
+          console.error(`⚠️ Зеркало ${mirror} не сработало: ${err.message}`);
+          if (err.message.includes("429") || err.message.includes("503")) {
+            await sleep(7000 + Math.random() * 3000);
+            continue;
           }
         }
       }
 
-      // 📰 Если удалось получить RSS
-      if (feed && feed.items && feed.items.length > 0) {
+      if (feed && feed.items?.length > 0) {
         const latestItem = feed.items[0];
-        const contentToHash = (latestItem.link || "") + (latestItem.title || "");
+        const contentToHash =
+          (latestItem.link || "") +
+          (latestItem.title || "") +
+          (latestItem.contentSnippet || "");
         const hash = crypto.createHash("md5").update(contentToHash).digest("hex");
 
         if (hash !== last_hash) {
@@ -195,7 +197,6 @@ if (domain.includes("tumblr.com")) {
             `🔔 Обновление на <b>${url}</b>\n\n${latestItem.title}\n<code>${latestItem.link}</code>`
           );
         }
-        await sleep(1000 + Math.random() * 1500);
         continue;
       }
 
@@ -212,16 +213,15 @@ if (domain.includes("tumblr.com")) {
       const html = await response.text();
       const $ = cheerio.load(html);
 
-      let elements = selector ? $(selector) : $(PRESET_SELECTORS[domain] || "body");
-
+      let elements = selector ? $(selector) : $(PRESET_SELECTORS[hostname] || "body");
       const content = (
         elements.text().trim() +
-        elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ")
-      ).slice(0, 5000);
+        elements.find("a").map((i, el) => $(el).attr("href")).get().join(" ") +
+        elements.find("img").map((i, el) => $(el).attr("alt") || "").get().join(" ")
+      ).slice(0, 15000);
 
       console.log(`👀 Проверка ${url}`);
-      console.log("➡️ Используем селектор:", selector || PRESET_SELECTORS[domain] || "body");
-      console.log("📄 Извлечённый контент:", content.slice(0, 300) + "...");
+      console.log("➡️ Используем селектор:", selector || PRESET_SELECTORS[hostname] || "body");
 
       const hash = crypto.createHash("md5").update(content).digest("hex");
 
@@ -237,9 +237,11 @@ if (domain.includes("tumblr.com")) {
       await sendTelegramMessage(chat_id, `❌ Ошибка при проверке <b>${url}</b>: ${err.message}`);
     }
 
-    await sleep(1000 + Math.random() * 2000);
+    // ⏳ увеличенная задержка между проверками
+    await sleep(5000 + Math.random() * 4000);
   }
 }
+
 
 
 // 📌 Ручная проверка (теперь как checkUpdates)
