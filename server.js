@@ -58,33 +58,37 @@ const RSS_MIRRORS = {
   "reddit.com": url => {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
- "tumblr.com": url => {
+"tumblr.com": url => {
   try {
     const u = new URL(url);
     let blogName = null;
 
+    // 1️⃣ Пример: unseenwarriorsellsword.tumblr.com
     if (u.hostname.endsWith(".tumblr.com")) {
-      // Пример: unseenwarriorsellsword.tumblr.com
       blogName = u.hostname.split(".")[0];
-    } else if (u.hostname === "www.tumblr.com" || u.hostname === "tumblr.com") {
-      // Примеры:
-      // https://www.tumblr.com/blog/unseenwarriorsellsword
-      // https://www.tumblr.com/unseenwarriorsellsword
+    }
+
+    // 2️⃣ Пример: www.tumblr.com/blog/unseenwarriorsellsword
+    // 3️⃣ Пример: www.tumblr.com/unseenwarriorsellsword
+    else if (u.hostname.includes("tumblr.com")) {
       const parts = u.pathname.split("/").filter(Boolean);
-      // Если URL вида /blog/username
+      // удаляем хвост вроде "?source=share"
       if (parts.length >= 2 && parts[0] === "blog") {
-        blogName = parts[1];
+        blogName = parts[1].split("?")[0];
       } else if (parts.length >= 1) {
-        blogName = parts[0];
+        blogName = parts[0].split("?")[0];
       }
     }
 
+    // Проверяем корректность
     if (!blogName || blogName === "www" || blogName === "undefined") {
       console.error("⚠️ Не удалось определить Tumblr-блог для URL:", url);
       return [];
     }
 
     console.log(`✅ Tumblr blog определён: ${blogName}`);
+
+    // Возвращаем зеркала
     return [
       `https://${blogName}.tumblr.com/rss`,
       `https://rsshub.app/tumblr/blog/${blogName}`
@@ -142,6 +146,7 @@ function sleep(ms) {
 
 // 📌 Проверка обновлений (через RSS или fallback)
 async function checkUpdates() {
+  await sleep(3000 + Math.random() * 2000); // 3–5 секунд между запросами
   const res = await pool.query("SELECT * FROM sites WHERE chat_id != 0");
   for (const row of res.rows) {
     const { chat_id, url, selector, last_hash } = row;
