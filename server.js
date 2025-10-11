@@ -26,6 +26,27 @@ const PRESET_SELECTORS = {
   "reddit.com": ".Post",
   "tumblr.com": ".post"
 };
+// 🧩 Универсальный Tumblr-парсер
+function extractTumblrBlogName(url) {
+  try {
+    const u = new URL(url);
+    // 1️⃣ Поддомен вида blogname.tumblr.com
+    if (u.hostname.endsWith(".tumblr.com")) {
+      return u.hostname.split(".tumblr.com")[0];
+    }
+    // 2️⃣ Формат www.tumblr.com/blog/blogname
+    const blogPath = u.pathname.match(/^\/blog\/([^\/]+)/);
+    if (blogPath && blogPath[1]) return blogPath[1];
+    // 3️⃣ Формат www.tumblr.com/blogname
+    const altPath = u.pathname.match(/^\/([^\/?]+)/);
+    if (altPath && altPath[1]) return altPath[1];
+    return null;
+  } catch (e) {
+    console.error("Ошибка разбора Tumblr URL:", e);
+    return null;
+  }
+}
+
 
 // 🔗 Зеркала для проблемных сайтов
 const RSS_MIRRORS = {
@@ -58,47 +79,43 @@ const RSS_MIRRORS = {
   "reddit.com": url => {
     return [url.endsWith("/") ? `${url}.rss` : `${url}/.rss`];
   },
-"tumblr.com": url => {
-  try {
-    const u = new URL(url);
-    let blogName = null;
+// 🧩 Улучшенный Tumblr-парсер
+  "tumblr.com": url => {
+    try {
+      const u = new URL(url);
+      let blogName = null;
 
-    // 1️⃣ Пример: unseenwarriorsellsword.tumblr.com
-    if (u.hostname.endsWith(".tumblr.com")) {
-      blogName = u.hostname.split(".")[0];
-    }
-
-    // 2️⃣ Пример: www.tumblr.com/blog/unseenwarriorsellsword
-    // 3️⃣ Пример: www.tumblr.com/unseenwarriorsellsword
-    else if (u.hostname.includes("tumblr.com")) {
-      const parts = u.pathname.split("/").filter(Boolean);
-      // удаляем хвост вроде "?source=share"
-      if (parts.length >= 2 && parts[0] === "blog") {
-        blogName = parts[1].split("?")[0];
-      } else if (parts.length >= 1) {
-        blogName = parts[0].split("?")[0];
+      // ✅ 1. поддомен blogname.tumblr.com
+      if (u.hostname.endsWith(".tumblr.com")) {
+        blogName = u.hostname.split(".tumblr.com")[0];
       }
-    }
 
-    // Проверяем корректность
-    if (!blogName || blogName === "www" || blogName === "undefined") {
-      console.error("⚠️ Не удалось определить Tumblr-блог для URL:", url);
+      // ✅ 2. формат www.tumblr.com/blog/blogname
+      // ✅ 3. формат www.tumblr.com/blogname
+      if (!blogName) {
+        const match = u.pathname.match(/(?:blog\/)?([^\/\?\#]+)/);
+        if (match && match[1]) {
+          blogName = match[1].replace(/[^a-zA-Z0-9_-]/g, "");
+        }
+      }
+
+      if (!blogName || blogName === "www" || blogName === "undefined") {
+        console.warn("⚠️ Не удалось определить Tumblr-блог для URL:", url);
+        return [];
+      }
+
+      console.log(`✅ Tumblr blog определён: ${blogName}`);
+      return [
+        `https://${blogName}.tumblr.com/rss`,
+        `https://rsshub.app/tumblr/blog/${blogName}`
+      ];
+    } catch (err) {
+      console.error("⚠️ Ошибка Tumblr-парсера:", err.message);
       return [];
     }
-
-    console.log(`✅ Tumblr blog определён: ${blogName}`);
-
-    // Возвращаем зеркала
-    return [
-      `https://${blogName}.tumblr.com/rss`,
-      `https://rsshub.app/tumblr/blog/${blogName}`
-    ];
-  } catch (err) {
-    console.error("⚠️ Ошибка Tumblr-парсера:", err.message);
-    return [];
   }
-},
 };
+
 
 
 // 📩 Отправка сообщений
